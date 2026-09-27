@@ -648,13 +648,11 @@ function openCompare(items) {
         <img src="${fileUrl(b.output)}" alt="B">
         <img class="clip" id="sl-clip" src="${fileUrl(a.output)}" alt="A">
         <div class="handle" id="sl-handle"></div>
-        <div class="tag" style="left:12px">${esc(a.model_name||"A")}</div>
-        <div class="tag" style="right:12px">${esc(b.model_name||"B")}</div>
       </div>
-      <div class="row space mt muted small">
-        <span>${esc(a.workflow_name||"")} · seed ${esc(a.seed??"—")}</span>
-        <span>drag the handle to reveal A ↔ B</span>
-        <span>seed ${esc(b.seed??"—")} · ${esc(b.workflow_name||"")}</span>
+      <div class="row space mt small">
+        <span><b>${esc(a.model_name||"A")}</b> <span class="muted">· ${esc(a.workflow_name||"")} · seed ${esc(a.seed??"—")}</span></span>
+        <span class="muted">drag the handle to reveal A ↔ B</span>
+        <span><b>${esc(b.model_name||"B")}</b> <span class="muted">· ${esc(b.workflow_name||"")} · seed ${esc(b.seed??"—")}</span></span>
       </div>`;
     const wrap = document.getElementById("sl"), clip = document.getElementById("sl-clip");
     let dragging = false;
