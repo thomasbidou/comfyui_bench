@@ -254,13 +254,26 @@ class BenchRunner:
         self.prompt_node_id = prompt_node_id
         self.comfy = ComfyUI(config.get("comfy_base") or "http://127.0.0.1:8188")
         self._stop = threading.Event()
+        self._stopped = False
 
     def stop(self):
+        """Request an abort: stop queuing more models, abort the one running
+        in ComfyUI, AND clear ComfyUI's pending queue so the GPU actually goes
+        idle. (interrupt() alone only aborts the current prompt and leaves the
+        rest of the bench still generating.)"""
+        self._stopped = True
         self._stop.set()
         try:
             self.comfy.interrupt()
         except Exception:
             pass
+        try:
+            self.comfy.clear_queue()
+        except Exception:
+            pass
+
+    def was_stopped(self):
+        return self._stopped
 
     def _prompt_in_queue(self, pid):
         """True if a prompt_id is still queued/running inside ComfyUI
@@ -364,9 +377,13 @@ class BenchRunner:
         # 1) queue all models. Each model is independent: a failure here
         #    (bad filename, loader mismatch, ComfyUI rejecting the prompt,
         #    a network blip) marks THAT model failed and moves to the next —
-        #    it never aborts the whole bench.
+        #    it never aborts the whole bench. If a stop is requested mid-loop we
+        #    stop queuing immediately and mark the rest cancelled.
         for m in self.models:
             mk = m["key"]
+            if self._stop.is_set():
+                store.set_model_status(self.bench_id, mk, status="cancelled")
+                continue
             store.set_model_status(self.bench_id, mk, status="queued")
             try:
                 mname = model_name_for(m, self.workflow.get("loader_type"))
@@ -440,7 +457,7 @@ def _run_one(runner, timeout_s):
     store.mark_running(runner.bench_id)
     try:
         runner.run(timeout_s=timeout_s)
-        store.mark_bench(runner.bench_id, "finished")
+        store.mark_bench(runner.bench_id, "stopped" if runner.was_stopped() else "finished")
     except Exception as e:
         store.mark_bench(runner.bench_id, "error")
         store.update_bench(runner.bench_id, error=str(e)[:400])
