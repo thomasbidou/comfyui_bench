@@ -43,7 +43,10 @@ frontend.
   with nothing selected; selects the currently-filtered results), then
   **compare**: exactly 2 → a drag **slider**, 3+ → a responsive **grid** —
   both open in a **full-window** view for close inspection. Every thumbnail has
-  a translucent **👁 eye** button to open that single image full-size.
+  a translucent **👁 eye** button to open that single image full-size; from
+  there use **← / → keys or the on-screen arrows** to step through the set
+  (all filtered outputs, or just the compared images when opened from the
+  compare grid), with a **N / M** counter.
 - **Workflows** — store, rename, and delete multiple test workflows (ComfyUI
   API-format JSON prompts). Add your own at any time.
 - **Home / history** — every bench you've run, with status and quick links to
