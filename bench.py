@@ -262,6 +262,22 @@ class BenchRunner:
         except Exception:
             pass
 
+    def _prompt_in_queue(self, pid):
+        """True if a prompt_id is still queued/running inside ComfyUI
+        (neither finished nor dropped). Used to detect a hung generation."""
+        if not pid:
+            return False
+        try:
+            q = self.comfy.queue_info()
+        except Exception:
+            return True  # can't tell — assume still queued (don't drop it)
+        for grp in ("queue_running", "queue_pending"):
+            for entry in (q.get(grp) or []):
+                if isinstance(entry, (list, tuple)) and len(entry) > 1 \
+                        and entry[1] == pid:
+                    return True
+        return False
+
     def _output_from_history(self, entry, model_name):
         out_root = config.get("output_root") or ""
         best = None
@@ -286,8 +302,9 @@ class BenchRunner:
             return best
         return find_output_file(out_root, model_name)
 
-    def _wait_model(self, pid, model_name, model_key, timeout_s):
+    def _wait_model(self, pid, model_name, model_key, timeout_s, stall_s=0):
         deadline = time.time() + timeout_s
+        last_progress = time.time()
 
         def _finish(status, output=None, error=None):
             store.set_model_status(self.bench_id, model_key, status=status,
@@ -305,6 +322,7 @@ class BenchRunner:
             entry = self.comfy.history(pid)
             if entry:
                 sstr = (entry.get("status") or {}).get("status_str")
+                last_progress = time.time()
                 if sstr == "success":
                     out_file = self._output_from_history(entry, model_name)
                     _finish("success", output=out_file)
@@ -329,20 +347,40 @@ class BenchRunner:
                     _finish("error" if sstr == "error" else "cancelled",
                             error=err)
                     return
+            else:
+                # No history yet. If the prompt was dropped from ComfyUI's
+                # queue (interrupted, OOM-killed, or otherwise abandoned) and
+                # never produced a result, don't wait until the full timeout —
+                # fail this model and move on.
+                if stall_s and pid and not self._prompt_in_queue(pid) \
+                        and (time.time() - last_progress) > stall_s:
+                    _finish("timeout",
+                            error="dropped from ComfyUI queue (interrupted/hung)")
+                    return
             time.sleep(3)
         _finish("timeout")
 
-    def run(self, timeout_s=900):
-        # 1) queue all models
+    def run(self, timeout_s=900, stall_s=180):
+        # 1) queue all models. Each model is independent: a failure here
+        #    (bad filename, loader mismatch, ComfyUI rejecting the prompt,
+        #    a network blip) marks THAT model failed and moves to the next —
+        #    it never aborts the whole bench.
         for m in self.models:
             mk = m["key"]
             store.set_model_status(self.bench_id, mk, status="queued")
-            mname = model_name_for(m, self.workflow.get("loader_type"))
-            prompt = apply_overrides(self.workflow["prompt"], mname, self.workflow,
-                                     seed=self.seed,
-                                     prompt_text=self.prompt_text,
-                                     prompt_node_id=self.prompt_node_id)
-            r = self.comfy.queue_prompt(prompt)
+            try:
+                mname = model_name_for(m, self.workflow.get("loader_type"))
+                prompt = apply_overrides(self.workflow["prompt"], mname,
+                                         self.workflow, seed=self.seed,
+                                         prompt_text=self.prompt_text,
+                                         prompt_node_id=self.prompt_node_id)
+                r = self.comfy.queue_prompt(prompt)
+            except Exception as e:
+                store.set_model_status(self.bench_id, mk, status="queue_error",
+                                       error=str(e)[:400])
+                hub.publish({"type": "model_done", "bench_id": self.bench_id,
+                             "model_key": mk, "status": "queue_error"})
+                continue
             if not r.get("ok"):
                 store.set_model_status(self.bench_id, mk, status="queue_error",
                                        error=str(r.get("error"))[:400])
@@ -364,7 +402,8 @@ class BenchRunner:
                 if self._stop.is_set():
                     store.set_model_status(self.bench_id, mk, status="cancelled")
                     continue
-                self._wait_model(st.get("prompt_id"), m["name"], mk, timeout_s)
+                self._wait_model(st.get("prompt_id"), m["name"], mk, timeout_s,
+                                 stall_s=stall_s)
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,10 @@ frontend.
   another bench while one is in flight and it simply **lines up** (shown as
   `queued · #n`) and starts automatically in order when the current one
   finishes. You can also **stop** a running bench or **drop** a queued one.
+- **Robust execution** — a single model failing or hanging **never crashes
+  the whole bench**: it's marked `error`/`timeout` and the run moves on to the
+  next model. A **stall guard** detects a prompt stuck in ComfyUI's queue and
+  fails that model early instead of waiting out the full per-model timeout.
 - **Outputs** — browse generated images by bench, select any of them, and
   **compare**: exactly 2 → a drag **slider**, 3+ → a side-by-side **grid**.
 - **Workflows** — store, rename, and delete multiple test workflows (ComfyUI
