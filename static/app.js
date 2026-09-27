@@ -1005,6 +1005,7 @@ async function renderOutputs() {
         <select id="o-bench" style="width:auto">
           <option value="">All benches</option>
         </select>
+        <button class="btn small" id="o-all">Select all</button>
         <button class="btn primary" id="o-cmp">Compare selected (${outSel.size})</button>
         <button class="btn small" id="o-clear">Clear</button>
       </div>
@@ -1020,6 +1021,12 @@ async function renderOutputs() {
     openCompare([...outSel.values()]);
   };
   document.getElementById("o-clear").onclick = () => { outSel.clear(); renderOutputs(); };
+  document.getElementById("o-all").onclick = () => {
+    // Select exactly the currently-visible outputs (the bench-filtered results),
+    // additively — matches the Models (#sel-all) and Run-bench (#r-all) convention.
+    d.outputs.forEach(o => outSel.set(o.id, o));
+    renderOutputs(); // re-renders cells (.sel) + the #o-cmp count
+  };
   const grid = document.getElementById("o-grid");
   grid.innerHTML = d.outputs.map(o => {
     const s = outSel.has(o.id);
