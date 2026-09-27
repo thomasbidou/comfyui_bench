@@ -310,7 +310,7 @@ function benchRow(b) {
   else if (b.status === "interrupted") badge = `<span class="badge wait">interrupted</span>`;
   else badge = `<span class="badge mut">${esc(b.status)}</span>`;
   const stopBtn = (b.active || b.queued)
-    ? `<button class="btn small" data-act="stop" data-bid="${esc(b.id)}" title="Stop${b.queued ? ' (drop from queue)' : ''}">⏸</button>`
+    ? `<button class="btn small danger" data-act="stop" data-bid="${esc(b.id)}" title="Stop the run (aborts remaining models in ComfyUI)${b.queued ? ' (drop from queue)' : ''}">■ stop</button>`
     : "";
   return `<div class="benchrow" data-bid="${esc(b.id)}">
     <div style="min-width:150px">
