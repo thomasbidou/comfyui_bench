@@ -77,7 +77,8 @@ let indActive = new Map(); // benchId -> {done,total,last}
 let indHideTimer = null;
 
 function onLive(msg) {
-  if (["progress","model_progress","bench_finished","model_done","model_queued"].includes(msg.type)) {
+  if (["progress","model_progress","bench_finished","bench_queued","bench_stopped",
+       "model_done","model_queued"].includes(msg.type)) {
     refreshIndicator();
     if (route.name === "home") refreshHomeList();
   }
@@ -284,17 +285,33 @@ function benchClickHandler(e) {
       location.hash = "#/outputs?bench=" + encodeURIComponent(bid);
       return;
     }
+    if (act === "stop") {
+      e.stopPropagation();
+      API.post(`/benches/${encodeURIComponent(bid)}/stop`)
+        .then(() => { refreshHomeList(); toast("Stopped"); })
+        .catch(err => toast(err.message));
+      return;
+    }
   }
   // row click -> outputs for this bench
   location.hash = "#/outputs?bench=" + encodeURIComponent(bid);
 }
 function benchRow(b) {
   const pct = b.total ? Math.min(100, Math.round(100*b.done/b.total)) : 0;
-  const badge = b.active ? `<span class="badge run"><span class="spin2"></span> running</span>`
-    : b.status==="finished" ? `<span class="badge ok">finished</span>`
-    : b.status==="error" ? `<span class="badge err">error</span>`
-    : b.status==="interrupted" ? `<span class="badge wait">interrupted</span>`
-    : `<span class="badge mut">${esc(b.status)}</span>`;
+  let badge;
+  if (b.active) badge = `<span class="badge run"><span class="spin2"></span> running</span>`;
+  else if (b.queued || b.status === "queued") {
+    const pos = (typeof b.queue_position === "number") ? (b.queue_position + 1) : null;
+    badge = `<span class="badge wait"><span class="spin2"></span> queued${pos ? ` · #${pos}` : ""}</span>`;
+  }
+  else if (b.status === "finished") badge = `<span class="badge ok">finished</span>`;
+  else if (b.status === "error") badge = `<span class="badge err">error</span>`;
+  else if (b.status === "stopped") badge = `<span class="badge mut">stopped</span>`;
+  else if (b.status === "interrupted") badge = `<span class="badge wait">interrupted</span>`;
+  else badge = `<span class="badge mut">${esc(b.status)}</span>`;
+  const stopBtn = (b.active || b.queued)
+    ? `<button class="btn small" data-act="stop" data-bid="${esc(b.id)}" title="Stop${b.queued ? ' (drop from queue)' : ''}">⏸</button>`
+    : "";
   return `<div class="benchrow" data-bid="${esc(b.id)}">
     <div style="min-width:150px">
       <div class="title">${esc(b.workflow_name||"bench")}</div>
@@ -303,6 +320,7 @@ function benchRow(b) {
     <div class="progressbar"><div style="width:${pct}%"></div></div>
     <div class="pct">${b.done}/${b.total}</div>
     ${badge}
+    ${stopBtn}
     <button class="btn small" data-act="view" data-bid="${esc(b.id)}">Outputs</button>
     <button class="btn small danger" data-act="del" data-bid="${esc(b.id)}">✕</button>
   </div>`;
@@ -894,7 +912,9 @@ async function renderBench() {
     };
     try {
       const r = await API.post("/benches/run", body);
-      toast(`Started bench (${r.bench.total} models)`);
+      toast(r.queued
+        ? `Queued bench (${r.bench.total} models) — will start when the current one finishes`
+        : `Started bench (${r.bench.total} models)`);
       // remember the chosen prompt node as the workflow default
       if (body.prompt_node_id) {
         API.put("/workflows/" + body.workflow_id, { prompt_node_id: body.prompt_node_id }).catch(()=>{});

@@ -147,11 +147,17 @@ class BenchStore:
         self._lock = threading.Lock()
         self.benches = read_json(BENCHES_PATH, {})   # {bench_id: bench}
         self.outputs = read_json(OUTPUTS_PATH, [])   # list[output]
-        # mark any bench that was running when we last shut down as interrupted
+        # mark benches that were in-flight/queued when we last shut down:
+        #  running -> interrupted, queued -> stopped (in-memory queue is gone)
         changed = False
         for b in self.benches.values():
             if b.get("status") == "running":
                 b["status"] = "interrupted"
+                changed = True
+            elif b.get("status") == "queued":
+                b["status"] = "stopped"
+                b["results"] = {}
+                b["done"] = 0
                 changed = True
         if changed:
             atomic_write_json(BENCHES_PATH, self.benches)
@@ -207,6 +213,14 @@ class BenchStore:
             if b:
                 b["status"] = status
                 b["finished"] = time.time()
+                self._save_benches()
+
+    def mark_running(self, bench_id):
+        """Transition a queued bench to running (don't set finished yet)."""
+        with self._lock:
+            b = self.benches.get(bench_id)
+            if b:
+                b["status"] = "running"
                 self._save_benches()
 
     def add_output(self, out):
@@ -355,9 +369,46 @@ class BenchRunner:
 
 # ---------------------------------------------------------------------------
 # Public API (FastAPI routes call these)
+#
+# Runs are SERIALIZED: only one bench executes at a time. start_bench enqueues
+# the run (status "queued"); a single dispatcher thread pops from the FIFO and
+# runs it. This protects ComfyUI's single queue and the UI's one-active model,
+# and means "prepare a run while one is running" simply lines it up.
 # ---------------------------------------------------------------------------
-_active = {}
+_active = {}                       # bench_id -> runner (currently running only)
 _active_lock = threading.Lock()
+_queue = []                        # FIFO of (runner, timeout_s) waiting to start
+_queue_lock = threading.Condition()
+
+
+def _dispatch_loop():
+    """Pop the next queued run and execute it. One at a time, FIFO order."""
+    while True:
+        with _queue_lock:
+            while not _queue:
+                _queue_lock.wait()
+            runner, timeout_s = _queue.pop(0)
+        try:
+            _run_one(runner, timeout_s)
+        except Exception:
+            pass  # _run_one handles its own error bookkeeping
+
+
+def _run_one(runner, timeout_s):
+    with _active_lock:
+        _active[runner.bench_id] = runner
+    hub.set_active_bench(runner.bench_id)
+    store.mark_running(runner.bench_id)
+    try:
+        runner.run(timeout_s=timeout_s)
+        store.mark_bench(runner.bench_id, "finished")
+    except Exception as e:
+        store.mark_bench(runner.bench_id, "error")
+        store.update_bench(runner.bench_id, error=str(e)[:400])
+    finally:
+        with _active_lock:
+            _active.pop(runner.bench_id, None)
+        hub.publish({"type": "bench_finished", "bench_id": runner.bench_id})
 
 
 def start_bench(models, workflow, seed=None, prompt_text=None,
@@ -366,7 +417,7 @@ def start_bench(models, workflow, seed=None, prompt_text=None,
         "id": str(uuid.uuid4()),
         "created": time.time(),
         "finished": None,
-        "status": "running",
+        "status": "queued",
         "workflow_id": workflow.get("id"),
         "workflow_name": workflow.get("name"),
         "seed": seed,
@@ -378,31 +429,49 @@ def start_bench(models, workflow, seed=None, prompt_text=None,
         "results": {},
     }
     store.create_bench(bench)
-    hub.set_active_bench(bench["id"])
     runner = BenchRunner(bench["id"], models, workflow, seed, prompt_text,
                          prompt_node_id)
+    with _queue_lock:
+        _queue.append((runner, timeout_s))
+        _queue_lock.notify()
+    # if nothing is running right now, tell the UI it will start imminently
     with _active_lock:
-        _active[bench["id"]] = runner
-    t = threading.Thread(target=_worker, args=(runner, timeout_s),
-                         name=f"bench-{bench['id'][:8]}", daemon=True)
-    t.start()
+        will_start_now = not _active
+    if will_start_now:
+        hub.publish({"type": "bench_queued", "bench_id": bench["id"],
+                     "starting": True})
+    else:
+        hub.publish({"type": "bench_queued", "bench_id": bench["id"],
+                     "starting": False,
+                     "position": queue_position(bench["id"])})
     return bench
 
 
-def _worker(runner, timeout_s):
-    try:
-        runner.run(timeout_s=timeout_s)
-        store.mark_bench(runner.bench_id, "finished")
-    except Exception as e:
-        store.mark_bench(runner.bench_id, "error")
-        store.update_bench(runner.bench_id, error=str(e)[:400])
-    finally:
-        hub.publish({"type": "bench_finished", "bench_id": runner.bench_id})
-        with _active_lock:
-            _active.pop(runner.bench_id, None)
+def queue_position(bench_id):
+    """0-indexed position of a bench in the pending queue (or None)."""
+    with _queue_lock:
+        for i, (r, _t) in enumerate(_queue):
+            if r.bench_id == bench_id:
+                return i
+    return None
+
+
+def pending_queue():
+    """Ordered list of bench ids currently waiting to start."""
+    with _queue_lock:
+        return [r.bench_id for (r, _t) in _queue]
 
 
 def stop_bench(bench_id):
+    """Stop a run: if queued, drop it; if running, signal the runner to abort."""
+    with _queue_lock:
+        for i, (r, _t) in enumerate(_queue):
+            if r.bench_id == bench_id:
+                del _queue[i]
+                store.mark_bench(bench_id, "stopped")
+                hub.publish({"type": "bench_stopped", "bench_id": bench_id,
+                            "reason": "removed from queue"})
+                return True
     with _active_lock:
         r = _active.get(bench_id)
     if r:
@@ -416,9 +485,19 @@ def is_active(bench_id):
         return bench_id in _active
 
 
+def is_queued(bench_id):
+    return queue_position(bench_id) is not None
+
+
 def active_bench_ids():
     with _active_lock:
         return list(_active.keys())
+
+
+# Start the dispatcher now that every function it references is defined.
+_dispatcher = threading.Thread(target=_dispatch_loop, name="bench-dispatcher",
+                               daemon=True)
+_dispatcher.start()
 
 
 # ---------------------------------------------------------------------------

@@ -36,8 +36,9 @@ from models import refresh as scan_models, discover_models
 from workflows import (workflow_summary, detect_model_loader,
                        detect_seed_nodes, detect_prompt_node,
                        convert_ui_to_api)
-from bench import (store, hub, start_bench, stop_bench, is_active,
-                   active_bench_ids, start_ws_listener_on_loop,
+from bench import (store, hub, start_bench, stop_bench, is_active, is_queued,
+                   queue_position, pending_queue, active_bench_ids,
+                   start_ws_listener_on_loop,
                    stop_ws_listener)
 from comfy import ComfyUI
 
@@ -448,9 +449,12 @@ def api_benches(request: Request):
     require_auth(request)
     benches = store.list_benches()
     active = active_bench_ids()
+    queue = pending_queue()
     for b in benches:
         b["active"] = b["id"] in active
-    return {"benches": benches, "active": active}
+        b["queued"] = b["id"] in queue
+        b["queue_position"] = queue.index(b["id"]) if b["id"] in queue else None
+    return {"benches": benches, "active": active, "queue": queue}
 
 
 @app.get("/api/benches/{bid}")
@@ -460,6 +464,8 @@ def api_bench_get(request: Request, bid: str):
     if not b:
         raise HTTPException(status_code=404, detail="bench not found")
     b["active"] = is_active(bid)
+    b["queued"] = is_queued(bid)
+    b["queue_position"] = queue_position(bid)
     return b
 
 
@@ -491,10 +497,12 @@ async def api_bench_run(request: Request, body: RunIn):
         seed = wf.get("base_seed", config.get("default_seed", 42))
     # Prompt-target node: explicit override > workflow's own setting > auto-detect.
     target_node = body.prompt_node_id or wf.get("prompt_node_id")
+    was_running = bool(active_bench_ids())
     bench = start_bench(models, wf, seed=seed, prompt_text=body.prompt,
                         prompt_node_id=target_node,
                         timeout_s=body.timeout or 900)
-    return {"ok": True, "bench": bench}
+    return {"ok": True, "bench": bench, "started": not was_running,
+            "queued": was_running}
 
 
 @app.post("/api/benches/{bid}/stop")
