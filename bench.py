@@ -230,12 +230,14 @@ store = BenchStore()
 # Runner
 # ---------------------------------------------------------------------------
 class BenchRunner:
-    def __init__(self, bench_id, models, workflow, seed=None, prompt_text=None):
+    def __init__(self, bench_id, models, workflow, seed=None, prompt_text=None,
+                 prompt_node_id=None):
         self.bench_id = bench_id
         self.models = models
         self.workflow = workflow
         self.seed = seed
         self.prompt_text = prompt_text
+        self.prompt_node_id = prompt_node_id
         self.comfy = ComfyUI(config.get("comfy_base") or "http://127.0.0.1:8188")
         self._stop = threading.Event()
 
@@ -324,7 +326,8 @@ class BenchRunner:
             mname = model_name_for(m, self.workflow.get("loader_type"))
             prompt = apply_overrides(self.workflow["prompt"], mname, self.workflow,
                                      seed=self.seed,
-                                     prompt_text=self.prompt_text)
+                                     prompt_text=self.prompt_text,
+                                     prompt_node_id=self.prompt_node_id)
             r = self.comfy.queue_prompt(prompt)
             if not r.get("ok"):
                 store.set_model_status(self.bench_id, mk, status="queue_error",
@@ -357,7 +360,8 @@ _active = {}
 _active_lock = threading.Lock()
 
 
-def start_bench(models, workflow, seed=None, prompt_text=None, timeout_s=900):
+def start_bench(models, workflow, seed=None, prompt_text=None,
+                prompt_node_id=None, timeout_s=900):
     bench = {
         "id": str(uuid.uuid4()),
         "created": time.time(),
@@ -367,6 +371,7 @@ def start_bench(models, workflow, seed=None, prompt_text=None, timeout_s=900):
         "workflow_name": workflow.get("name"),
         "seed": seed,
         "prompt": (prompt_text or "")[:2000],
+        "prompt_node_id": prompt_node_id,
         "total": len(models),
         "done": 0,
         "model_keys": [m["key"] for m in models],
@@ -374,7 +379,8 @@ def start_bench(models, workflow, seed=None, prompt_text=None, timeout_s=900):
     }
     store.create_bench(bench)
     hub.set_active_bench(bench["id"])
-    runner = BenchRunner(bench["id"], models, workflow, seed, prompt_text)
+    runner = BenchRunner(bench["id"], models, workflow, seed, prompt_text,
+                         prompt_node_id)
     with _active_lock:
         _active[bench["id"]] = runner
     t = threading.Thread(target=_worker, args=(runner, timeout_s),

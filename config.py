@@ -37,7 +37,6 @@ DEFAULTS = {
     "host": "0.0.0.0",
     "port": 7860,
     "default_seed": 42,
-    "nsfw_banner": False,
     "dark_mode": True,
 }
 

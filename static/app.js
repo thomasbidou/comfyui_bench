@@ -18,6 +18,15 @@ const API = {
     if (!r.ok) throw new ApiError(r.status, (data && data.detail) || data || r.statusText);
     return data;
   },
+  // multipart upload (no Content-Type header; browser sets the boundary)
+  async upload(path, formdata) {
+    const r = await fetch("/api" + path, { method: "POST", body: formdata });
+    if (r.status === 401) throw new AuthError();
+    const text = await r.text();
+    let data; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+    if (!r.ok) throw new ApiError(r.status, (data && data.detail) || data || r.statusText);
+    return data;
+  },
   get: (p) => API.req("GET", p),
   post: (p, b) => API.req("POST", p, b),
   put: (p, b) => API.req("PUT", p, b),
@@ -28,15 +37,13 @@ class AuthError extends Error {}
 class ApiError extends Error { constructor(s, d) { super(d); this.status = s; this.detail = d; } }
 
 function fileUrl(p) { return "/api/files?path=" + encodeURIComponent(p); }
-function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c =>
-  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c =>
+  ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c])); }
 function fmtBytes(n) { if (!n) return "—";
   const u = ["B","KB","MB","GB","TB"]; let i=0; while (n>=1024 && i<u.length-1){n/=1024;i++;}
   return n.toFixed(n<10&&i>0?1:0)+" "+u[i]; }
 function fmtTime(ts) { if (!ts) return "—";
   return new Date(ts*1000).toLocaleString(undefined,{dateStyle:"medium",timeStyle:"short"}); }
-function fmtDur(s) { if (s==null) return "—"; s=Math.round(s);
-  if (s<60) return s+"s"; const m=Math.floor(s/60); return m+"m "+(s%60)+"s"; }
 function stars(n) { n=Math.max(0,Math.min(5,n|0)); return "★".repeat(n)+"☆".repeat(5-n); }
 
 // ---------------------------------------------------------------------------
@@ -51,7 +58,7 @@ function toast(msg, ms=3200) {
 }
 
 // ---------------------------------------------------------------------------
-// Live WS
+// Live WS + bench indicator (lingers ~60s after completion)
 // ---------------------------------------------------------------------------
 let ws = null, wsTimer = null;
 function connectWS() {
@@ -64,51 +71,81 @@ function connectWS() {
   ws.onerror = () => { try { ws.close(); } catch {} };
 }
 function scheduleReconnect() { if (!wsTimer) wsTimer = setTimeout(connectWS, 2000); }
+
+const INDICATOR_GRACE_MS = 120_000; // keep showing 100% for ~2 min
+let indActive = new Map(); // benchId -> {done,total,last}
+let indHideTimer = null;
+
 function onLive(msg) {
-  // update the global bench indicator
-  const t = msg.type;
-  if (t === "progress" || t === "model_progress" || t === "bench_finished" ||
-      t === "model_done" || t === "model_queued") {
-    updateBenchIndicator();
-    if (route.name === "home" || route.name === "bench") {
-      // refresh the active bench list in place (debounced)
-      refreshActiveBenches();
-    }
+  if (["progress","model_progress","bench_finished","model_done","model_queued"].includes(msg.type)) {
+    refreshIndicator();
+    if (route.name === "home") refreshHomeList();
   }
 }
 
-async function updateBenchIndicator() {
+async function refreshIndicator() {
   const el = document.getElementById("bench-indicator");
+  if (!el) return;
   try {
     const b = await API.get("/benches");
-    const act = b.benches.filter(x => x.active);
-    if (!act.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
-    const r = act[0];
-    const pct = r.total ? Math.round(100*r.done/r.total) : 0;
+    const now = Date.now();
+    // drop finished ones older than grace
+    for (const [id, v] of [...indActive]) {
+      if (v.done >= v.total && (now - v.last) > INDICATOR_GRACE_MS) indActive.delete(id);
+    }
+    for (const x of b.benches) {
+      if (x.active) indActive.set(x.id, { done: x.done, total: x.total, last: now });
+      else if (indActive.has(x.id)) {
+        const v = indActive.get(x.id);
+        v.done = x.done; v.total = x.total; v.last = now;
+      }
+    }
+    if (!indActive.size) {
+      el.classList.add("hidden"); el.innerHTML = "";
+      if (indHideTimer) { clearTimeout(indHideTimer); indHideTimer = null; }
+      return;
+    }
+    // pick the most recently active
+    let cur = null;
+    for (const v of indActive.values()) if (!cur || v.last > cur.last) cur = v;
+    const pct = cur.total ? Math.min(100, Math.round(100 * cur.done / cur.total)) : 0;
+    const done = cur.done >= cur.total;
     el.classList.remove("hidden");
-    el.innerHTML = `<span class="spin"></span> Bench ${r.done}/${r.total} · ${pct}%`;
+    el.innerHTML = done
+      ? `<span class="badge ok">✓</span> Bench ${cur.done}/${cur.total} · 100%`
+      : `<span class="spin"></span> Bench ${cur.done}/${cur.total} · ${pct}%`;
     el.onclick = () => { location.hash = "#/home"; };
+    // schedule auto-hide
+    if (done && !indHideTimer) {
+      indHideTimer = setTimeout(() => {
+        indActive.clear(); indHideTimer = null; refreshIndicator();
+      }, INDICATOR_GRACE_MS);
+    }
   } catch {}
 }
 
 // ---------------------------------------------------------------------------
-// Router
+// Router (supports #/page, #/page/a/b, and #/page?k=v)
 // ---------------------------------------------------------------------------
-const route = { name: "home", params: {} };
+const route = { name: "home", params: {}, query: {} };
 const PAGES = {
   home: renderHome, models: renderModels, workflows: renderWorkflows,
   bench: renderBench, outputs: renderOutputs, setup: renderSetup,
 };
 function parseRoute() {
-  const h = location.hash.replace(/^#\//, "") || "home";
-  const [name, ...rest] = h.split("/");
-  const page = PAGES[name] ? name : "home";
-  return { name: page, params: { path: rest.join("/") } };
+  const raw = location.hash.replace(/^#\//, "") || "home";
+  const [namepart, querypart] = raw.split("?");
+  const name = PAGES[namepart] ? namepart : "home";
+  const path = namepart.split("/").slice(1);
+  const query = {};
+  if (querypart) new URLSearchParams(querypart).forEach((v,k) => query[k]=v);
+  return { name, path, query };
 }
 async function navigate() {
-  route.name = parseRoute().name;
+  const r = parseRoute();
+  route.name = r.name; route.params = { path: r.path.join("/") }; route.query = r.query;
   document.querySelectorAll("#nav a").forEach(a => {
-    a.classList.toggle("active", a.getAttribute("href") === "#/"+route.name);
+    a.classList.toggle("active", a.getAttribute("href") === "#/" + route.name);
   });
   const view = document.getElementById("view");
   view.innerHTML = `<div class="empty"><span class="spin2"></span>&nbsp; loading…</div>`;
@@ -124,59 +161,38 @@ window.addEventListener("hashchange", navigate);
 // ---------------------------------------------------------------------------
 // Auth / boot
 // ---------------------------------------------------------------------------
-let auth = { nsfw:false, dark:true };
+let auth = { dark:true, default_seed:42 };
 async function boot() {
   applyTheme();
-  try {
-    auth = await API.get("/auth");
-  } catch (e) {
-    if (e instanceof AuthError) { showLogin(); return; }
-  }
-  if (auth.authenticated) {
-    showApp();
-  } else {
-    showLogin();
-  }
+  try { auth = await API.get("/auth"); }
+  catch (e) { if (e instanceof AuthError) { showLogin(); return; } }
+  if (auth.authenticated) showApp(); else showLogin();
 }
 function showLogin() {
   document.getElementById("login").classList.remove("hidden");
   document.getElementById("shell").classList.add("hidden");
-  document.getElementById("login-nsfw").classList.toggle("hidden", !auth.nsfw);
   document.getElementById("login-token").focus();
 }
 function showApp() {
   document.getElementById("login").classList.add("hidden");
-  const sh = document.getElementById("shell");
-  sh.classList.remove("hidden");
+  document.getElementById("shell").classList.remove("hidden");
   connectWS();
-  updateBenchIndicator();
+  refreshIndicator();
   if (!location.hash) location.hash = "#/home";
-  if (route.name !== parseRoute().name) navigate();
+  navigate(); // always render the current route on entry
 }
 async function doLogin() {
   const tok = document.getElementById("login-token").value.trim();
   if (!tok) return;
   try {
-    const r = await API.post("/auth/login", { token: tok });
-    auth = r;
-    if (r.nsfw) showNsfwAcceptance();
-    else { localStorage.setItem("cb_theme", document.documentElement.dataset.theme); showApp(); }
-  } catch (e) {
+    auth = await API.post("/auth/login", { token: tok });
+    localStorage.setItem("cb_theme", document.documentElement.dataset.theme);
+    showApp();
+  } catch {
     toast("Invalid token", 2500);
     document.getElementById("login-token").value = "";
     document.getElementById("login-token").focus();
   }
-}
-function showNsfwAcceptance() {
-  document.getElementById("login-nsfw").classList.remove("hidden");
-  document.getElementById("login-btn").textContent = "I am authorized — enter";
-  const btn = document.getElementById("login-btn");
-  const orig = btn.onclick;
-  btn.onclick = async (e) => {
-    e.preventDefault();
-    const ok = confirm("This service hosts NSFW / adult content.\n\nBy continuing you confirm you are an authorized user.\nContinue?");
-    if (ok) showApp();
-  };
 }
 document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("login-btn").onclick = doLogin;
@@ -200,7 +216,7 @@ function toggleTheme() {
 }
 
 // ---------------------------------------------------------------------------
-// Modal helper
+// Modal
 // ---------------------------------------------------------------------------
 function modal(html, { wide=false } = {}) {
   const root = document.getElementById("modal-root");
@@ -217,46 +233,63 @@ function modal(html, { wide=false } = {}) {
 }
 function closeModal() { document.getElementById("modal-root").innerHTML = ""; }
 
-// ---------------------------------------------------------------------------
-// Refresh helpers
-// ---------------------------------------------------------------------------
-function refreshActiveBenches() {
-  // no-op hook; home page polls while visible
-}
-
 // ===========================================================================
-// PAGE: Home (bench history)
+// PAGE: Home (bench history) — event-delegated so re-renders don't kill clicks
 // ===========================================================================
 let homePoll = null;
 async function renderHome() {
   clearInterval(homePoll);
   const view = document.getElementById("view");
-  const d = await API.get("/benches");
   view.innerHTML = `
     <div class="row space wrap mb">
       <div><h1 style="margin:0">Bench history</h1>
-      <div class="muted small">${d.benches.length} run(s)</div></div>
+      <div class="muted small" id="home-count"></div></div>
       <button class="btn primary" id="home-run">+ Run new bench</button>
     </div>
-    <div id="home-list">${renderBenchList(d)}</div>`;
+    <div id="home-list"></div>`;
   document.getElementById("home-run").onclick = () => location.hash = "#/bench";
-
-  const poll = async () => {
-    try {
-      const b = await API.get("/benches");
-      const active = b.benches.filter(x => x.active);
-      if (active.length) {
-        const el = document.getElementById("home-list");
-        if (el) el.innerHTML = renderBenchList({ benches: b.benches, active });
-        updateBenchIndicator();
-      }
-    } catch {}
-  };
-  homePoll = setInterval(poll, 2500);
-  poll();
+  // Delegate all row interactions to the container (survives re-renders).
+  if (!view._homeBound) { view.addEventListener("click", benchClickHandler); view._homeBound = true; }
+  refreshHomeList();
+  homePoll = setInterval(refreshHomeList, 2500);
+  refreshIndicator();
+}
+function refreshHomeList() {
+  API.get("/benches").then(d => {
+    const el = document.getElementById("home-list");
+    if (!el) return;
+    el.innerHTML = d.benches.map(benchRow).join("") ||
+      `<div class="empty">No benches yet. Run your first bench from "Run bench".</div>`;
+    const c = document.getElementById("home-count");
+    if (c) c.textContent = `${d.benches.length} run(s)`;
+  }).catch(() => {});
+}
+function benchClickHandler(e) {
+  const btn = e.target.closest("[data-act]");
+  const row = e.target.closest(".benchrow");
+  if (!row) return;
+  const bid = row.dataset.bid;
+  if (btn) {
+    const act = btn.dataset.act;
+    if (act === "del") {
+      e.stopPropagation();
+      if (!confirm("Delete this bench record? (Images are kept on disk.)")) return;
+      API.del("/benches/" + encodeURIComponent(bid))
+        .then(() => { refreshHomeList(); toast("Deleted"); })
+        .catch(err => toast(err.message));
+      return;
+    }
+    if (act === "view") {
+      e.stopPropagation();
+      location.hash = "#/outputs?bench=" + encodeURIComponent(bid);
+      return;
+    }
+  }
+  // row click -> outputs for this bench
+  location.hash = "#/outputs?bench=" + encodeURIComponent(bid);
 }
 function benchRow(b) {
-  const pct = b.total ? Math.round(100*b.done/b.total) : 0;
+  const pct = b.total ? Math.min(100, Math.round(100*b.done/b.total)) : 0;
   const badge = b.active ? `<span class="badge run"><span class="spin2"></span> running</span>`
     : b.status==="finished" ? `<span class="badge ok">finished</span>`
     : b.status==="error" ? `<span class="badge err">error</span>`
@@ -274,35 +307,12 @@ function benchRow(b) {
     <button class="btn small danger" data-act="del" data-bid="${esc(b.id)}">✕</button>
   </div>`;
 }
-function renderBenchList(d) {
-  const rows = d.benches.map(benchRow).join("");
-  const el = document.getElementById("home-list") || null;
-  if (el) {
-    el.innerHTML = rows || `<div class="empty">No benches yet. Run your first bench from “Run bench”.</div>`;
-    el.querySelectorAll(".benchrow").forEach(row => {
-      row.onclick = (e) => {
-        if (e.target.dataset.act) return;
-        location.hash = "#/outputs?bench=" + row.dataset.bid;
-      };
-    });
-    el.querySelectorAll("[data-act=del]").forEach(btn => btn.onclick = async (e) => {
-      e.stopPropagation();
-      if (!confirm("Delete this bench record? (Images are kept on disk.)")) return;
-      try { await API.del("/benches/" + btn.dataset.bid); renderHome(); }
-      catch (err) { toast(err.message); }
-    });
-    el.querySelectorAll("[data-act=view]").forEach(btn => btn.onclick = (e) => {
-      e.stopPropagation(); location.hash = "#/outputs?bench=" + btn.dataset.bid;
-    });
-  }
-  return rows || `<div class="empty">No benches yet.</div>`;
-}
 
 // ===========================================================================
-// PAGE: Models (folder tree + grid)
+// PAGE: Models (nested folder tree + grid)
 // ===========================================================================
 let selModels = new Set();
-let modelState = { folder: "", root: "", q: "", sort: "name", models: [] };
+let modelState = { root: "", folder: "", q: "", sort: "name", models: [] };
 
 async function renderModels() {
   const view = document.getElementById("view");
@@ -334,7 +344,7 @@ async function renderModels() {
   document.getElementById("m-sort").onchange = (e) => { modelState.sort = e.target.value; loadModels(); };
   document.getElementById("m-refresh").onclick = async () => {
     toast("Re-scanning…");
-    try { const r = await API.post("/models/refresh"); toast(`Found ${r.count} models`); loadModels(); }
+    try { const r = await API.post("/models/refresh"); toast(`Found ${r.count} models`); loadTree(); loadModels(); }
     catch (e) { toast(e.message); }
   };
   loadTree();
@@ -343,7 +353,7 @@ async function renderModels() {
 async function loadTree() {
   const tree = await API.get("/models/tree");
   const el = document.getElementById("m-tree");
-  el.innerHTML = renderTree(tree.tree, []);
+  el.innerHTML = renderTree(tree.tree, null);
   el.querySelectorAll(".node").forEach(n => n.onclick = () => {
     el.querySelectorAll(".node").forEach(x => x.classList.remove("sel"));
     n.classList.add("sel");
@@ -351,25 +361,32 @@ async function loadTree() {
     modelState.folder = n.dataset.folder || "";
     loadModels();
   });
-  // default select root-level (all)
-  const all = el.querySelector('[data-folder=""]');
-  if (all) { all.classList.add("sel"); }
+  // default-select the first root
+  const first = el.querySelector(".node.root");
+  if (first) { first.classList.add("sel"); modelState.root = first.dataset.root; loadModels(); }
 }
-function renderTree(node, path) {
+function renderTree(node, ctx) {
+  // ctx === null  -> top level: each key is a full model-ROOT path.
+  // ctx = {root, parts} -> nested folders; parts are RELATIVE folder segments.
   let out = "";
-  const keys = Object.keys(node);
-  keys.sort((a,b) => (a === "/" ? -1 : b === "/" ? 1 : a.localeCompare(b)));
+  const keys = Object.keys(node).sort((a, b) => a.localeCompare(b));
   for (const k of keys) {
     const child = node[k] || {};
-    const isRoot = (k === "/");
-    const label = isRoot ? "All models" : (k.split("/").pop() || k);
-    const folder = isRoot ? "" : (path.concat([k]).join("/"));
-    const cnt = countLeaves(child);
     const hasKids = Object.keys(child).length > 0;
-    const dataRoot = path.length ? path[0] : (k);
-    out += `<div class="node ${isRoot?'root':''}" data-root="${esc(dataRoot)}" data-folder="${esc(folder)}">
+    let isRoot, label, dataRoot, folder, childParts;
+    if (ctx === null) {
+      isRoot = true; label = k.split("/").pop() || k;
+      dataRoot = k; folder = ""; childParts = [];
+    } else {
+      isRoot = false; label = k;
+      dataRoot = ctx.root;
+      folder = ctx.parts.concat([k]).join("/");
+      childParts = folder.split("/");
+    }
+    const cnt = countLeaves(child);
+    out += `<div class="node ${isRoot ? "root" : ""}" data-root="${esc(dataRoot)}" data-folder="${esc(folder)}">
       <span class="tw">${hasKids ? "▸" : ""}</span> ${esc(label)} <span class="cnt">${cnt}</span></div>`;
-    if (hasKids) out += `<ul>${renderTree(child, path.concat([k]))}</ul>`;
+    if (hasKids) out += `<ul>${renderTree(child, { root: dataRoot, parts: childParts })}</ul>`;
   }
   return out;
 }
@@ -380,8 +397,8 @@ function countLeaves(node) {
 }
 async function loadModels() {
   const params = new URLSearchParams();
-  if (modelState.folder) params.set("folder", modelState.folder);
   if (modelState.root) params.set("root", modelState.root);
+  if (modelState.folder) params.set("folder", modelState.folder);
   if (modelState.q) params.set("q", modelState.q);
   params.set("sort", modelState.sort);
   const d = await API.get("/models?" + params.toString());
@@ -407,11 +424,8 @@ function renderModelGrid(models) {
     </div>`;
   }).join("") || `<div class="empty" style="grid-column:1/-1">No models in this folder.</div>`;
   el.querySelectorAll(".mcard").forEach(c => c.onclick = (e) => {
-    if (e.target.classList.contains("cb") || e.target.closest(".cb")) {
-      toggleSel(c.dataset.key);
-    } else {
-      openModelDetail(c.dataset.key);
-    }
+    if (e.target.classList.contains("cb") || e.target.closest(".cb")) toggleSel(c.dataset.key);
+    else openModelDetail(c.dataset.key);
   });
   updateSelbar();
 }
@@ -446,7 +460,7 @@ function updateSelbar() {
 }
 
 async function openModelDetail(key) {
-  const m = await API.get("/models/" + key);
+  const m = await API.get("/models/" + encodeURIComponent(key));
   const box = modal(`
     <div class="mh"><h2 style="margin:0">${esc(m.display_name || m.name)}</h2>
       <button class="btn small" data-close>Close ✕</button></div>
@@ -465,7 +479,6 @@ async function openModelDetail(key) {
             <span class="k">Size</span><span class="v">${fmtBytes(m.size)}</span>
             <span class="k">Base model</span><span class="v">${esc(m.base_model||"—")}</span>
             <span class="k">Civitai</span><span class="v">${m.civitai?.name ? esc(m.civitai.name)+" · "+(m.civitai.author||"") : "—"}</span>
-            <span class="k">Stats</span><span class="v">${m.civitai?.likes!=null?m.civitai.likes+" 👍 ":""}${m.civitai?.downloads!=null?m.civitai.downloads+" ⬇":""}</span>
             <span class="k">Stars</span><span class="v"><span class="stars" id="md-stars">${stars(m.stars)}</span></span>
           </div>
           <label class="field mt"><span class="lab">Notes</span>
@@ -480,10 +493,9 @@ async function openModelDetail(key) {
         <div id="tab-outputs" class="hidden"></div>
       </div>
     </div>`);
-  // star buttons
   const sb = document.getElementById("md-star-btns");
   sb.innerHTML = [0,1,2,3,4].map(i =>
-    `<button class="iconbtn" data-star="${i+1}" style="width:28px;height:28px">${i < m.stars ? "★" : "☆"}</button>`).join("");
+    `<button class="iconbtn" data-star="${i+1}" style="width:28px;height:28px">${i < (m.stars||0) ? "★" : "☆"}</button>`).join("");
   sb.querySelectorAll("button").forEach(b => b.onclick = () => {
     const v = +b.dataset.star;
     sb.querySelectorAll("button").forEach((x,i) => x.textContent = (i < v) ? "★" : "☆");
@@ -498,11 +510,12 @@ async function openModelDetail(key) {
   });
   document.getElementById("md-save").onclick = async () => {
     const notes = document.getElementById("md-notes").value;
-    const starBtns = sb.querySelectorAll("button");
-    let s = 0; starBtns.forEach((b,i) => { if (b.textContent === "★") s = i+1; });
+    let s = 0; sb.querySelectorAll("button").forEach((b,i) => { if (b.textContent === "★") s = i+1; });
     try {
       await API.patch("/models/" + encodeURIComponent(key), { notes, stars: s });
       toast("Saved");
+      // reflect
+      document.getElementById("md-stars").textContent = stars(s);
     } catch (e) { toast(e.message); }
   };
   document.getElementById("md-run").onclick = () => {
@@ -519,15 +532,13 @@ async function renderModelOutputs(el, m) {
       <div class="lbl">${esc(o.workflow_name||"")} · ${new Date(o.created*1000).toLocaleDateString()}</div>
     </div>`).join("") + `</div>
     <div class="row mt"><button class="btn" data-cmp>Compare selected</button>
-    <span class="muted small" id="cmp-hint">select 2 for slider, 3+ for grid</span></div>`;
+    <span class="muted small">select 2 for slider, 3+ for grid</span></div>`;
   let picked = [];
   el.querySelectorAll(".ocell").forEach(c => c.onclick = () => {
     const id = c.dataset.out;
     const idx = picked.indexOf(id);
     if (idx>=0) { picked.splice(idx,1); c.classList.remove("sel"); }
     else { picked.push(id); c.classList.add("sel"); }
-    const o = outs.find(x => x.id===id);
-    if (idx<0) c.querySelector(".tick") || c.insertAdjacentHTML("beforeend","<div class='tick'>✓</div>");
   });
   el.querySelector("[data-cmp]").onclick = () => {
     if (picked.length < 2) { toast("Select at least 2 outputs"); return; }
@@ -539,7 +550,7 @@ async function renderModelOutputs(el, m) {
 // COMPARE (slider for 2, grid for 3+)
 // ===========================================================================
 function openCompare(items) {
-  const box = modal(`<div class="mh"><h2 style="margin:0">Compare ${items.length} output(s)</h2>
+  modal(`<div class="mh"><h2 style="margin:0">Compare ${items.length} output(s)</h2>
     <button class="btn small" data-close>Close ✕</button></div><div class="mb2" id="cmp-body"></div>`, { wide:true });
   const body = document.getElementById("cmp-body");
   if (items.length === 2) {
@@ -557,14 +568,12 @@ function openCompare(items) {
         <span>drag the handle to reveal A ↔ B</span>
         <span>seed ${esc(b.seed??"—")} · ${esc(b.workflow_name||"")}</span>
       </div>`;
-    const wrap = document.getElementById("sl"),
-          clip = document.getElementById("sl-clip"),
-          handle = document.getElementById("sl-handle");
+    const wrap = document.getElementById("sl"), clip = document.getElementById("sl-clip");
     let dragging = false;
     const setPos = (pct) => {
       pct = Math.max(0, Math.min(100, pct));
       clip.style.clipPath = `inset(0 ${100-pct}% 0 0)`;
-      handle.style.left = pct + "%";
+      document.getElementById("sl-handle").style.left = pct + "%";
     };
     setPos(50);
     const move = (clientX) => {
@@ -584,7 +593,7 @@ function openCompare(items) {
 }
 
 // ===========================================================================
-// PAGE: Workflows
+// PAGE: Workflows (+ upload)
 // ===========================================================================
 async function renderWorkflows() {
   const view = document.getElementById("view");
@@ -593,10 +602,15 @@ async function renderWorkflows() {
     <div class="row space wrap mb">
       <div><h1 style="margin:0">Workflows</h1>
         <div class="muted small">Test workflows — each swaps the model + optional prompt/seed.</div></div>
-      <button class="btn primary" id="wf-add">+ Add workflow</button>
+      <div class="row">
+        <label class="btn small" style="cursor:pointer">⬆ Upload .json
+          <input type="file" id="wf-upload" accept=".json,application/json" class="hidden">
+        </label>
+        <button class="btn primary" id="wf-add">+ Add (paste JSON)</button>
+      </div>
     </div>
-    <div id="wf-list">${d.workflows.map(wfRow).join("") || `<div class="empty">No workflows. Add one.</div>`}</div>
-    <div class="card mt"><h3>Add a workflow</h3>
+    <div id="wf-list">${d.workflows.map(wfRow).join("") || `<div class="empty">No workflows. Upload or add one.</div>`}</div>
+    <div class="card mt hidden" id="wf-addcard"><h3>Add a workflow</h3>
       <p class="muted small">Paste a ComfyUI <b>API-format</b> prompt (JSON, the <code>prompt</code> object from a workflow — not the UI graph). It must contain a <code>CheckpointLoaderSimple</code> or <code>UNETLoaderWithName</code> node.</p>
       <label class="field"><span class="lab">Name</span><input id="wf-name" placeholder="e.g. Text to Image (Anima)"></label>
       <label class="field"><span class="lab">Description</span><input id="wf-desc" placeholder="optional"></label>
@@ -605,8 +619,25 @@ async function renderWorkflows() {
       <button class="btn primary" id="wf-submit">Add workflow</button>
     </div>`;
   bindWfList();
-  document.getElementById("wf-add").onclick = () =>
-    document.getElementById("wf-json").scrollIntoView({behavior:"smooth"});
+  document.getElementById("wf-add").onclick = () => {
+    const card = document.getElementById("wf-addcard");
+    card.classList.toggle("hidden");
+    if (!card.classList.contains("hidden")) card.scrollIntoView({behavior:"smooth"});
+  };
+  document.getElementById("wf-upload").onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const fd = new FormData();
+    fd.append("file", f);
+    fd.append("name", f.name.replace(/\.(json)$/i, ""));
+    toast("Uploading & converting…");
+    try {
+      const r = await API.upload("/workflows/upload", fd);
+      toast(`Workflow added: ${r.workflow.name}`);
+      renderWorkflows();
+    } catch (err) { toast(err.message); }
+    e.target.value = "";
+  };
   document.getElementById("wf-submit").onclick = async () => {
     const name = document.getElementById("wf-name").value.trim();
     const desc = document.getElementById("wf-desc").value.trim();
@@ -621,7 +652,7 @@ async function renderWorkflows() {
 }
 function wfRow(w) {
   const s = w.summary || {};
-  return `<div class="card mb" style="cursor:default">
+  return `<div class="card mb">
     <div class="row space wrap">
       <div>
         <h3 style="margin:0">${esc(w.name)}</h3>
@@ -658,7 +689,7 @@ function bindWfList() {
 }
 
 // ===========================================================================
-// PAGE: Run bench
+// PAGE: Run bench (with prompt-target node picker)
 // ===========================================================================
 async function renderBench() {
   const view = document.getElementById("view");
@@ -668,7 +699,7 @@ async function renderBench() {
   const pendingModels = JSON.parse(localStorage.getItem("cb_pending_models") || "[]");
   const pendingWf = localStorage.getItem("cb_pending_wf");
   localStorage.removeItem("cb_pending_models"); localStorage.removeItem("cb_pending_wf");
-  const wfSel = pendingWf || wfs[0]?.id || "";
+  const wfSel = pendingWf || (wfs.workflows[0] && wfs.workflows[0].id) || "";
 
   view.innerHTML = `
     <h1 style="margin:0 0 4px">Run bench</h1>
@@ -679,8 +710,11 @@ async function renderBench() {
           <select id="r-wf">${wfs.workflows.map(w=>`<option value="${esc(w.id)}" ${w.id===wfSel?"selected":""}>${esc(w.name)}</option>`).join("")}</select></label>
         <label class="field"><span class="lab">Seed <span class="faint">(fixed for comparability)</span></span>
           <input id="r-seed" type="number" value="${auth.default_seed||42}"></label>
-        <label class="field"><span class="lab">Prompt override <span class="faint">(optional — overrides the workflow's base prompt)</span></span>
+        <label class="field"><span class="lab">Prompt override <span class="faint">(optional)</span></span>
           <textarea id="r-prompt" rows="4" placeholder="leave blank to use the workflow's default prompt"></textarea></label>
+        <label class="field"><span class="lab">Prompt target node <span class="faint">(which node your override replaces)</span></span>
+          <select id="r-pnode"></select>
+          <div class="row wrap mt" id="r-pnode-actions"></div></label>
         <label class="field"><span class="lab">Per-model timeout (s)</span>
           <input id="r-timeout" type="number" value="900"></label>
         <button class="btn primary" id="r-start" style="width:100%">▶ Start bench</button>
@@ -700,6 +734,39 @@ async function renderBench() {
         <div style="max-height:56vh;overflow:auto;border:1px solid var(--border);border-radius:var(--radius-s)" id="r-list"></div>
       </div>
     </div>`;
+
+  // ---- prompt-target node picker ----
+  const pnodeSel = document.getElementById("r-pnode");
+  const curWf = () => wfs.workflows.find(w => w.id === document.getElementById("r-wf").value);
+  const renderPnode = () => {
+    const wf = curWf();
+    const cands = (wf && wf.summary && wf.summary.prompt_candidates) || [];
+    const current = wf && wf.prompt_node_id;
+    if (!cands.length) {
+      pnodeSel.innerHTML = `<option value="">(none detected)</option>`;
+      pnodeSel.disabled = true;
+      document.getElementById("r-pnode-actions").innerHTML = "";
+      return;
+    }
+    pnodeSel.disabled = false;
+    pnodeSel.innerHTML = cands.map(c =>
+      `<option value="${esc(c.id)}" ${c.id===current?"selected":""}>node ${esc(c.id)} · ${esc(c.class_type||"")} · ${esc(c.preview||"")}</option>`
+    ).join("");
+    document.getElementById("r-pnode-actions").innerHTML =
+      `<button class="btn small" id="r-pnode-default">Set as default for this workflow</button>`;
+    document.getElementById("r-pnode-default").onclick = async () => {
+      const wf = curWf(); if (!wf) return;
+      const val = pnodeSel.value;
+      try {
+        await API.put("/workflows/" + wf.id, { prompt_node_id: val });
+        toast(`Default prompt node for "${wf.name}" set to ${val}`);
+      } catch (e) { toast(e.message); }
+    };
+  };
+  renderPnode();
+  document.getElementById("r-wf").onchange = renderPnode;
+
+  // ---- model list ----
   const rList = document.getElementById("r-list");
   const set = new Set(pendingModels);
   const renderList = (filter="") => {
@@ -720,13 +787,12 @@ async function renderBench() {
   document.getElementById("r-none").onclick = () => { set.clear(); renderList(document.getElementById("r-q").value); };
   renderList();
 
-  const wfsel = document.getElementById("r-wf");
+  // ---- loader-type warning ----
   const showWarn = () => {
-    const wf = wfs.workflows.find(w => w.id === wfsel.value);
+    const wf = curWf();
     const warnEl = document.getElementById("r-warn");
     if (!wf) { warnEl.innerHTML=""; return; }
     const loader = wf.summary?.loader_type;
-    // warn if selected models don't match loader type
     const unetModels = models.models.filter(m => set.has(m.key) && m.root.endsWith("diffusion_models"));
     const ckptModels = models.models.filter(m => set.has(m.key) && m.root.endsWith("checkpoints"));
     let w = "";
@@ -734,34 +800,41 @@ async function renderBench() {
     if (loader === "CheckpointLoaderSimple" && unetModels.length) w += `⚠ ${unetModels.length} UNET model(s) selected but this workflow uses CheckpointLoader (expects checkpoint files).<br>`;
     warnEl.innerHTML = w;
   };
-  wfsel.onchange = showWarn;
+  document.getElementById("r-wf").onchange = () => { renderPnode(); showWarn(); };
   showWarn();
 
   document.getElementById("r-start").onclick = async () => {
     if (!set.size) { toast("Select at least one model"); return; }
     const body = {
       model_keys: [...set],
-      workflow_id: wfsel.value,
+      workflow_id: document.getElementById("r-wf").value,
       seed: parseInt(document.getElementById("r-seed").value),
       prompt: document.getElementById("r-prompt").value.trim() || null,
+      prompt_node_id: pnodeSel.value || null,
       timeout: parseInt(document.getElementById("r-timeout").value) || 900,
     };
     try {
       const r = await API.post("/benches/run", body);
       toast(`Started bench (${r.bench.total} models)`);
+      // remember the chosen prompt node as the workflow default
+      if (body.prompt_node_id) {
+        API.put("/workflows/" + body.workflow_id, { prompt_node_id: body.prompt_node_id }).catch(()=>{});
+      }
       location.hash = "#/home";
+      refreshIndicator();
     } catch (e) { toast(e.message); }
   };
 }
 
 // ===========================================================================
-// PAGE: Outputs
+// PAGE: Outputs (bench-filterable)
 // ===========================================================================
 let outSel = new Map(); // id -> output
 async function renderOutputs() {
   const view = document.getElementById("view");
+  const benchId = (route.query && route.query.bench) || "";
   const params = new URLSearchParams();
-  if (route.params?.path) params.set("bench_id", route.params.path);
+  if (benchId) params.set("bench_id", benchId);
   const d = await API.get("/outputs?" + params.toString());
   view.innerHTML = `
     <div class="row space wrap mb">
@@ -776,22 +849,20 @@ async function renderOutputs() {
       </div>
     </div>
     <div class="ogrid" id="o-grid"></div>`;
-  // fill bench filter
   const sel = document.getElementById("o-bench");
   const list = await API.get("/benches");
   sel.innerHTML = `<option value="">All benches</option>` +
-    list.benches.map(b => `<option value="${esc(b.id)}" ${route.params?.path===b.id?"selected":""}>${new Date(b.created*1000).toLocaleDateString()} · ${esc(b.workflow_name)} (${b.done}/${b.total})</option>`).join("");
-  sel.onchange = () => { location.hash = sel.value ? "#/outputs?bench="+sel.value : "#/outputs"; };
+    list.benches.map(b => `<option value="${esc(b.id)}" ${benchId===b.id?"selected":""}>${new Date(b.created*1000).toLocaleDateString()} · ${esc(b.workflow_name)} (${b.done}/${b.total})</option>`).join("");
+  sel.onchange = () => { location.hash = sel.value ? "#/outputs?bench="+encodeURIComponent(sel.value) : "#/outputs"; };
   document.getElementById("o-cmp").onclick = () => {
     if (outSel.size < 2) { toast("Select at least 2"); return; }
     openCompare([...outSel.values()]);
   };
   document.getElementById("o-clear").onclick = () => { outSel.clear(); renderOutputs(); };
-
   const grid = document.getElementById("o-grid");
   grid.innerHTML = d.outputs.map(o => {
-    const sel = outSel.has(o.id);
-    return `<div class="ocell ${sel?"sel":""}" data-oid="${esc(o.id)}">
+    const s = outSel.has(o.id);
+    return `<div class="ocell ${s?"sel":""}" data-oid="${esc(o.id)}">
       <div class="tick">✓</div>
       <img loading="lazy" src="${fileUrl(o.output)}">
       <div class="lbl">${esc(o.model_name||"")} · ${esc(o.workflow_name||"")}</div>
@@ -801,7 +872,7 @@ async function renderOutputs() {
   grid.querySelectorAll(".ocell").forEach(c => c.onclick = () => {
     const id = c.dataset.oid;
     if (outSel.has(id)) outSel.delete(id);
-    else { outSel.set(id, d.outputs.find(o => o.id===id)); }
+    else outSel.set(id, d.outputs.find(o => o.id===id));
     c.classList.toggle("sel", outSel.has(id));
     document.getElementById("o-cmp").textContent = `Compare selected (${outSel.size})`;
   });
@@ -833,8 +904,6 @@ async function renderSetup() {
         <h3>App</h3>
         <label class="field"><span class="lab">Default seed</span>
           <input id="s-seed" type="number" value="${esc(c.default_seed??42)}"></label>
-        <label class="row" style="margin-bottom:12px"><input type="checkbox" id="s-nsfw" ${c.nsfw_banner?"checked":""} style="width:auto">
-          <span class="grow">NSFW banner (login warning)</span></label>
         <label class="row" style="margin-bottom:12px"><input type="checkbox" id="s-dark" ${c.dark_mode?"checked":""} style="width:auto">
           <span class="grow">Dark mode (default)</span></label>
         <div class="row space">
@@ -850,10 +919,6 @@ async function renderSetup() {
         </div>
       </div>
     </div>`;
-  // show current token
-  try {
-    const auth = await API.get("/auth");
-  } catch {}
   const tok = await getToken();
   document.getElementById("s-token").textContent = tok || "(hidden)";
   document.getElementById("s-copy").onclick = async () => {
@@ -867,7 +932,6 @@ async function renderSetup() {
     catch(e){toast(e.message);}
   };
   document.getElementById("s-test").onclick = async () => {
-    // save first so the test uses the new value
     await saveSetup();
     const out = document.getElementById("s-testout");
     out.innerHTML = `<span class="spin2"></span>&nbsp; testing…`;
@@ -875,23 +939,17 @@ async function renderSetup() {
       const r = await API.post("/config/test-connection");
       if (r.ok) {
         const dev = (r.device||[])[0];
-        out.innerHTML = `<span class="badge ok">connected</span> ${dev?`<span class="pill">${esc(dev.name||"GPU")}</span>`:""}${r.system?`<span class="pill">${esc(r.system?.name||"")}</span>`:""}`;
-      } else {
-        out.innerHTML = `<span class="badge err">not reachable</span>`;
-      }
+        out.innerHTML = `<span class="badge ok">connected</span> ${dev?`<span class="pill">${esc(dev.name||"GPU")}</span>`:""}`;
+      } else out.innerHTML = `<span class="badge err">not reachable</span>`;
     } catch (e) { out.innerHTML = `<span class="badge err">error: ${esc(e.message)}</span>`; }
   };
   document.getElementById("s-save").onclick = async () => {
-    try { await saveSetup(); toast("Saved"); }
-    catch (e) { toast(e.message); }
+    try { await saveSetup(); toast("Saved"); } catch (e) { toast(e.message); }
   };
 }
 async function getToken() {
-  // fetch from config (server returns it to authed users)
-  try {
-    const c = await API.get("/config");
-    return c.token || null;
-  } catch { return null; }
+  try { const r = await API.get("/config/token"); return r.token || null; }
+  catch { return null; }
 }
 async function saveSetup() {
   const body = {
@@ -899,11 +957,9 @@ async function saveSetup() {
     output_root: document.getElementById("s-out").value.trim(),
     model_roots: document.getElementById("s-roots").value.split("\n").map(s=>s.trim()).filter(Boolean),
     default_seed: parseInt(document.getElementById("s-seed").value)||42,
-    nsfw_banner: document.getElementById("s-nsfw").checked,
     dark_mode: document.getElementById("s-dark").checked,
   };
   await API.put("/config", body);
-  auth.nsfw = body.nsfw_banner;
   auth.dark = body.dark_mode;
 }
 

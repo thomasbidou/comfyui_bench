@@ -18,6 +18,7 @@ Routes:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from typing import Optional
@@ -33,7 +34,8 @@ from config import (config, ensure_state, MODELS_PATH, WORKFLOWS_PATH,
                     USER_META_PATH, atomic_write_json, read_json)
 from models import refresh as scan_models, discover_models
 from workflows import (workflow_summary, detect_model_loader,
-                       detect_seed_nodes, detect_prompt_node)
+                       detect_seed_nodes, detect_prompt_node,
+                       convert_ui_to_api)
 from bench import (store, hub, start_bench, stop_bench, is_active,
                    active_bench_ids, start_ws_listener_on_loop,
                    stop_ws_listener)
@@ -135,11 +137,12 @@ def api_models_tree(request: Request):
     models = _all_models()
     tree = {}
     for m in models:
-        parts = [m["root"], m["folder"]]
+        parts = [m["root"]] + (m["folder"].split("/") if m["folder"] else [])
         cur = tree
         for p in parts:
-            if p:
-                cur = cur.setdefault(p, {})
+            if not p:
+                continue
+            cur = cur.setdefault(p, {})
     return {"tree": tree}
 
 
@@ -162,25 +165,23 @@ def api_model_get(request: Request, key: str):
 @app.patch("/api/models/{key:path}")
 def api_model_patch(request: Request, key: str, body: ModelMeta):
     require_auth(request)
-    changed = False
+    if body.notes is None and body.stars is None:
+        return {"ok": True}
+    # Capture the model once; read current notes/stars and apply the change.
+    # (Bug we're avoiding: re-scanning in a second loop returned fresh objects,
+    # so the persisted values were always the empty defaults.)
     for m in _all_models():
         if m["key"] == key:
-            if body.notes is not None:
-                m["notes"] = body.notes
-                changed = True
-            if body.stars is not None:
-                m["stars"] = max(0, min(5, int(body.stars)))
-                changed = True
-            break
-    if changed:
-        # persist just this model's meta
-        meta = read_json(USER_META_PATH, {})
-        for m in _all_models():
-            if m["key"] == key:
-                meta[key] = {"notes": m["notes"], "stars": m["stars"]}
-                break
-        atomic_write_json(USER_META_PATH, meta)
-    return {"ok": True}
+            notes = body.notes if body.notes is not None else (m.get("notes") or "")
+            stars = max(0, min(5, int(body.stars))) if body.stars is not None \
+                else (m.get("stars") or 0)
+            meta = read_json(USER_META_PATH, {})
+            if not isinstance(meta, dict):
+                meta = {}
+            meta[key] = {"notes": notes, "stars": stars}
+            atomic_write_json(USER_META_PATH, meta)
+            return {"ok": True, "notes": notes, "stars": stars}
+    raise HTTPException(status_code=404, detail="model not found")
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +240,70 @@ async def api_workflow_add(request: Request, body: WorkflowIn):
     return {"ok": True, "workflow": w}
 
 
+@app.post("/api/workflows/upload")
+async def api_workflow_upload(request: Request):
+    """Upload a ComfyUI-exported .json (UI graph with nodes/links, or an
+    API prompt) and register it as a workflow.
+
+    Accepts either:
+      * a UI graph  {"nodes": [...], "links": [...], "extra": {...}}
+        (what you get from ComfyUI → Save / prompt-export)
+      * an API prompt {"52": {"inputs":..., "class_type":...}, ...}
+    If it's a UI graph we convert it server-side using ComfyUI's own
+    object_info, so widget/link mapping is correct.
+    """
+    require_auth(request)
+    form = await request.form()
+    file = form.get("file")
+    if file is None:
+        raise HTTPException(400, "missing 'file' field")
+    raw = await file.read()
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        raise HTTPException(400, f"invalid JSON: {e}")
+
+    is_ui = isinstance(data, dict) and ("nodes" in data or "links" in data)
+    if is_ui:
+        comfy_base = config.get("comfy_base") or "http://127.0.0.1:8188"
+        prompt, _warn = convert_ui_to_api(data, comfy_base)
+    else:
+        if not isinstance(data, dict) or not any(
+                isinstance(v, dict) and "class_type" in v for v in data.values()):
+            raise HTTPException(400,
+                                "not a recognizable ComfyUI workflow "
+                                "(no nodes/links or class_type nodes)")
+        prompt = data
+
+    summary = workflow_summary(prompt)
+    if not summary["model_node_id"]:
+        raise HTTPException(400,
+                            "no model loader node found "
+                            "(CheckpointLoaderSimple / UNETLoaderWithName)")
+    name = (form.get("name") or file.filename or "Uploaded workflow")
+    desc = (form.get("description") or "")
+
+    import uuid
+    import time
+    wfs = _workflows()
+    w = {
+        "id": str(uuid.uuid4()),
+        "name": name,
+        "description": desc,
+        "prompt": prompt,
+        "model_node_id": summary["model_node_id"],
+        "loader_type": summary["loader_type"],
+        "model_field": summary["model_field"],
+        "seed_node_ids": summary["seed_node_ids"],
+        "prompt_node_id": summary["prompt_node_id"],
+        "base_prompt": summary["base_prompt"],
+        "created": time.time(),
+    }
+    wfs.append(w)
+    _save_workflows(wfs)
+    return {"ok": True, "workflow": w}
+
+
 @app.get("/api/workflows/{wid}")
 def api_workflow_get(request: Request, wid: str):
     require_auth(request)
@@ -254,6 +319,7 @@ class WorkflowRename(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     base_seed: Optional[int] = None
+    prompt_node_id: Optional[str] = None
 
 
 @app.put("/api/workflows/{wid}")
@@ -268,6 +334,12 @@ def api_workflow_put(request: Request, wid: str, body: WorkflowRename):
                 w["description"] = body.description
             if body.base_seed is not None:
                 w["base_seed"] = int(body.base_seed)
+            if body.prompt_node_id is not None:
+                cands = (workflow_summary(w.get("prompt", {})) or {}).get("prompt_candidates") or []
+                if cands and body.prompt_node_id not in cands:
+                    raise HTTPException(status_code=400,
+                                        detail="prompt_node_id not in this workflow's candidates")
+                w["prompt_node_id"] = body.prompt_node_id
             break
     _save_workflows(wfs)
     return {"ok": True}
@@ -309,6 +381,7 @@ class RunIn(BaseModel):
     workflow_id: str
     seed: Optional[int] = None
     prompt: Optional[str] = None
+    prompt_node_id: Optional[str] = None
     timeout: Optional[int] = None
 
 
@@ -329,7 +402,10 @@ async def api_bench_run(request: Request, body: RunIn):
     seed = body.seed
     if seed is None:
         seed = wf.get("base_seed", config.get("default_seed", 42))
+    # Prompt-target node: explicit override > workflow's own setting > auto-detect.
+    target_node = body.prompt_node_id or wf.get("prompt_node_id")
     bench = start_bench(models, wf, seed=seed, prompt_text=body.prompt,
+                        prompt_node_id=target_node,
                         timeout_s=body.timeout or 900)
     return {"ok": True, "bench": bench}
 
@@ -371,7 +447,6 @@ def api_auth(request: Request):
     return {
         "authenticated": bool(_token_from_request(request)
                               and config.check_token(_token_from_request(request))),
-        "nsfw": config.get("nsfw_banner", False),
         "dark": config.get("dark_mode", True),
         "default_seed": config.get("default_seed", 42),
     }
@@ -386,7 +461,6 @@ def api_login(request: Request, body: LoginIn):
     if not config.check_token(body.token):
         raise HTTPException(status_code=401, detail="invalid token")
     resp = JSONResponse({"ok": True,
-                         "nsfw": config.get("nsfw_banner", False),
                          "dark": config.get("dark_mode", True),
                          "default_seed": config.get("default_seed", 42)})
     resp.set_cookie("cb_token", body.token, httponly=True, samesite="lax",
@@ -409,7 +483,6 @@ class ConfigIn(BaseModel):
     host: Optional[str] = None
     port: Optional[int] = None
     default_seed: Optional[int] = None
-    nsfw_banner: Optional[bool] = None
     dark_mode: Optional[bool] = None
     comfy_dir: Optional[str] = None
 
@@ -429,6 +502,12 @@ def api_config_regen(request: Request):
     require_auth(request)
     tok = config.regenerate_token()
     return {"ok": True, "token": tok}
+
+
+@app.get("/api/config/token")
+def api_config_token(request: Request):
+    require_auth(request)
+    return {"token": config.get("token") or ""}
 
 
 @app.post("/api/config/test-connection")
