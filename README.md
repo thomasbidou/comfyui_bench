@@ -41,7 +41,8 @@ frontend.
   fails that model early instead of waiting out the full per-model timeout.
 - **Outputs** — browse generated images by bench, **Select all** (visible even
   with nothing selected; selects the currently-filtered results), then
-  **compare**: exactly 2 → a drag **slider**, 3+ → a responsive **grid** —
+  **compare**: exactly 2 → a drag **slider** (sized to ~90% of the window,
+  centered), 3+ → a responsive **grid** —
   both open in a **full-window** view for close inspection. Every thumbnail has
   a translucent **👁 eye** button to open that single image full-size; from
   there use **← / → keys or the on-screen arrows** to step through the set
