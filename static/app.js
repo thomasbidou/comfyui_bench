@@ -236,12 +236,12 @@ function toggleTheme() {
 // ---------------------------------------------------------------------------
 // Modal
 // ---------------------------------------------------------------------------
-function modal(html, { wide=false } = {}) {
+function modal(html, { wide=false, full=false } = {}) {
   const root = document.getElementById("modal-root");
   const back = document.createElement("div");
-  back.className = "modal-back";
+  back.className = "modal-back" + (full ? " full" : "");
   const box = document.createElement("div");
-  box.className = "modal" + (wide ? " wide" : "");
+  box.className = "modal" + (wide ? " wide" : "") + (full ? " full" : "");
   box.innerHTML = html;
   back.appendChild(box);
   back.addEventListener("click", e => { if (e.target === back) closeModal(); });
@@ -628,7 +628,7 @@ async function renderModelOutputs(el, m) {
 // ===========================================================================
 function openCompare(items) {
   modal(`<div class="mh"><h2 style="margin:0">Compare ${items.length} output(s)</h2>
-    <button class="btn small" data-close>Close ✕</button></div><div class="mb2" id="cmp-body"></div>`, { wide:true });
+    <button class="btn small" data-close>Close ✕</button></div><div class="mb2" id="cmp-body"></div>`, { full:true });
   const body = document.getElementById("cmp-body");
   if (items.length === 2) {
     const [a,b] = items;
@@ -667,6 +667,21 @@ function openCompare(items) {
       <figcaption><b>${esc(o.model_name||"")}</b><br>${esc(o.workflow_name||"")} · seed ${esc(o.seed??"—")}<br>${new Date(o.created*1000).toLocaleString()}</figcaption>
       </figure>`).join("") + `</div>`;
   }
+}
+
+// Single-output full-window viewer (opened from a thumbnail's 👁 eye button)
+function openSingle(o) {
+  modal(`<div class="mh"><h2 style="margin:0">${esc(o.model_name||"Image")}</h2>
+    <button class="btn small" data-close>Close ✕</button></div>
+    <div class="mb2 single">
+      <img src="${fileUrl(o.output)}" alt="">
+      <div class="cap">
+        <span><b>${esc(o.model_name||"")}</b></span>
+        <span class="muted">${esc(o.workflow_name||"")}</span>
+        <span class="muted">seed ${esc(o.seed??"—")}</span>
+        <span class="muted">${new Date(o.created*1000).toLocaleString()}</span>
+      </div>
+    </div>`, { full:true });
 }
 
 // ===========================================================================
@@ -1032,6 +1047,11 @@ async function renderOutputs() {
     const s = outSel.has(o.id);
     return `<div class="ocell ${s?"sel":""}" data-oid="${esc(o.id)}">
       <div class="tick">✓</div>
+      <button class="eye" type="button" title="View full size" aria-label="View full size">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5C21.27 7.61 17 4.5 12 4.5zM12 17a5 5 0 110-10 5 5 0 010 10zm0-8a3 3 0 100 6 3 3 0 000-6z"/>
+        </svg>
+      </button>
       <img loading="lazy" src="${fileUrl(o.output)}">
       <div class="lbl">${esc(o.model_name||"")} · ${esc(o.workflow_name||"")}</div>
       <div class="lbl faint">${new Date(o.created*1000).toLocaleDateString()}</div>
@@ -1043,6 +1063,13 @@ async function renderOutputs() {
     else outSel.set(id, d.outputs.find(o => o.id===id));
     c.classList.toggle("sel", outSel.has(id));
     document.getElementById("o-cmp").textContent = `Compare selected (${outSel.size})`;
+  });
+  // 👁 eye button: open that single output full-window. stopPropagation so it
+  // does NOT also toggle the cell's selection.
+  grid.querySelectorAll(".eye").forEach(b => b.onclick = (e) => {
+    e.stopPropagation();
+    const o = d.outputs.find(x => x.id === b.closest(".ocell").dataset.oid);
+    if (o) openSingle(o);
   });
 }
 

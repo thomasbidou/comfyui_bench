@@ -177,4 +177,37 @@ label.field .lab{font-size:12.5px;color:var(--dim);font-weight:600;margin-bottom
 .token-box{font-family:ui-monospace,Menlo,Consolas,monospace;background:var(--bg2);border:1px dashed var(--border2);
   padding:10px 12px;border-radius:var(--radius-s);word-break:break-all;user-select:all}
 .pill{display:inline-block;padding:2px 8px;background:var(--bg3);border-radius:6px;font-size:11.5px;color:var(--dim);margin:2px 3px 2px 0;font-family:ui-monospace,monospace}
+
+/* ---- full-window modal (compare + single-image viewer) ---- */
+.modal-back.full{padding:0;place-items:stretch;background:rgba(0,0,0,.82)}
+.modal.full{width:100%;height:100%;max-width:none;max-height:none;
+  overflow:hidden;border:none;border-radius:0;box-shadow:none;
+  display:flex;flex-direction:column}
+.modal.full .mh{flex:0 0 auto}
+.modal.full .mb2{flex:1 1 auto;overflow:auto;padding:18px}
+
+/* 2-image slider fills the window (drag logic is width-relative — stays intact) */
+.modal.full .slider-wrap{max-width:none;max-height:none;aspect-ratio:auto;
+  width:100%;height:100%;border-radius:0}
+.modal.full .slider-wrap img{width:100%;height:100%;object-fit:cover}
+
+/* 3+ grid: responsive wall of large images, scrolls vertically in .mb2 */
+.modal.full .cmp-grid{grid-template-columns:repeat(auto-fill,minmax(340px,1fr));
+  grid-auto-flow:row;justify-content:stretch;overflow-x:visible}
+.modal.full .cmp-grid figure{min-width:0;max-width:none;width:100%}
+.modal.full .cmp-grid img{max-height:none;width:100%;height:auto;
+  object-fit:contain;background:#000}
+
+/* 👁 eye overlay on Outputs thumbnails — sits opposite the .tick (top-left) */
+.ocell .eye{position:absolute;top:8px;left:8px;z-index:3;width:30px;height:30px;
+  border-radius:50%;border:1px solid rgba(255,255,255,.55);background:rgba(0,0,0,.35);
+  color:#fff;display:grid;place-items:center;cursor:pointer;padding:0;
+  opacity:.45;transition:opacity .12s,transform .12s,background .12s}
+.ocell .eye:hover{opacity:1;transform:scale(1.08);background:rgba(0,0,0,.6)}
+
+/* single-image full-window viewer */
+.modal.full .mb2.single{display:flex;flex-direction:column;align-items:center;gap:14px;padding:24px}
+.modal.full .mb2.single img{max-width:100%;max-height:calc(100vh - 150px);
+  object-fit:contain;background:#000;border-radius:var(--radius-s);border:1px solid var(--border)}
+.modal.full .mb2.single .cap{display:flex;flex-wrap:wrap;gap:8px 18px;justify-content:center;font-size:13px}
 code{background:var(--bg2);padding:1px 5px;border-radius:4px;font-family:ui-monospace,monospace;font-size:12.5px}
