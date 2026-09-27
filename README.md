@@ -101,7 +101,27 @@ Change these on the **Setup** page (or edit `state/config.json`), then click
 **⟳ refresh** on the Models page. The **Test connection** button confirms the
 ComfyUI link and reports the GPU it sees.
 
-### Running as a service (optional)
+### Running as a service (recommended)
+
+The app is meant to be **always on**. On this box it runs as a **systemd user
+service** (`comfyui-bench`), so it starts at boot (login not required —
+`loginctl enable-linger` is on) and auto-restarts if it crashes.
+
+```bash
+# one-time install (unit lives in ~/.config/systemd/user/comfyui-bench.service)
+systemctl --user daemon-reload
+systemctl --user enable --now comfyui-bench
+
+# day-to-day
+systemctl --user status  comfyui-bench   # state + recent log
+systemctl --user start|stop|restart comfyui-bench
+journalctl --user -u comfyui-bench -f     # follow the log
+```
+
+> ⚠️ Do **not** also run `uvicorn` by hand — it would fight the service for
+> port `7860`. Manage it via `systemctl --user` instead.
+
+If you just want a quick manual run (e.g. for testing):
 
 ```bash
 # from the repo directory
