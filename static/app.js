@@ -688,26 +688,76 @@ function openCompare(items) {
     body.querySelectorAll(".cmp-grid figure .eye").forEach(b => {
       b.onclick = (e) => {
         e.stopPropagation();
-        const o = items[+b.closest("figure").dataset.i];
-        if (o) openSingle(o);
+        const i = +b.closest("figure").dataset.i;
+        const o = items[i];
+        if (o) openSingle(o, items, i);
       };
     });
   }
 }
 
 // Single-output full-window viewer (opened from a thumbnail's 👁 eye button)
-function openSingle(o) {
-  modal(`<div class="mh"><h2 style="margin:0">${esc(o.model_name||"Image")}</h2>
+function openSingle(o, list = [o], index = 0) {
+  const n = list.length;
+  const box = modal(`<div class="mh"><h2 style="margin:0">${esc(o.model_name||"Image")}</h2>
     <button class="btn small" data-close>Close ✕</button></div>
     <div class="mb2 single">
-      <img src="${fileUrl(o.output)}" alt="">
+      <img id="single-img" src="${fileUrl(o.output)}" alt="">
       <div class="cap">
-        <span><b>${esc(o.model_name||"")}</b></span>
-        <span class="muted">${esc(o.workflow_name||"")}</span>
-        <span class="muted">seed ${esc(o.seed??"—")}</span>
-        <span class="muted">${new Date(o.created*1000).toLocaleString()}</span>
+        <span id="single-idx" class="muted"></span>
+        <span><b id="single-model">${esc(o.model_name||"")}</b></span>
+        <span class="muted" id="single-wf">${esc(o.workflow_name||"")}</span>
+        <span class="muted" id="single-seed">seed ${esc(o.seed??"—")}</span>
+        <span class="muted" id="single-date">${new Date(o.created*1000).toLocaleString()}</span>
       </div>
-    </div>`, { full:true });
+    </div>
+    <button class="nav-arrow nav-prev" type="button" aria-label="Previous image" title="Previous (←)">
+      <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><path d="M15 5 8 12l7 7" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="nav-arrow nav-next" type="button" aria-label="Next image" title="Next (→)">
+      <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>`, { full:true });
+  box.__list = list;
+  box.__idx = Math.max(0, Math.min(index, n - 1));
+  if (n <= 1) box.classList.add("solo");
+
+  // Re-render the CURRENT item in place — never calls modal()/closeModal(), so
+  // any modal stacked behind (e.g. the compare grid) stays byte-for-byte intact.
+  const render = () => {
+    const cur = box.__list[box.__idx];
+    if (!cur) return;
+    box.querySelector("#single-img").src = fileUrl(cur.output);
+    box.querySelector("#single-model").textContent = cur.model_name || "";
+    box.querySelector("#single-wf").textContent = cur.workflow_name || "";
+    box.querySelector("#single-seed").textContent = "seed " + (cur.seed ?? "—");
+    box.querySelector("#single-date").textContent = new Date(cur.created * 1000).toLocaleString();
+    box.querySelector("#single-idx").textContent = n > 1 ? (box.__idx + 1) + " / " + n : "";
+    box.querySelector(".mh h2").textContent = cur.model_name || "Image";
+  };
+  const go = (dir) => {
+    if (n <= 1) return;                       // single-item: no-op
+    box.__idx = (box.__idx + dir + n) % n;    // wrap-around
+    render();
+  };
+
+  box.querySelector(".nav-prev").onclick = () => go(-1);
+  box.querySelector(".nav-next").onclick = () => go(1);
+  render(); // normalize the counter for the initial item
+
+  // Keyboard nav: active ONLY while this viewer is the topmost modal, and never
+  // while typing in a field. Detached on close via __onclose (the viewer set
+  // none before, so this overwrites nothing).
+  const back = box.parentElement;             // the .modal-back backdrop
+  const onKey = (e) => {
+    const root = document.getElementById("modal-root");
+    if (!root || root.lastElementChild !== back) return; // topmost guard
+    const t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    if (e.key === "ArrowLeft") { e.preventDefault(); go(-1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); go(1); }
+  };
+  window.addEventListener("keydown", onKey);
+  box.__onclose = () => window.removeEventListener("keydown", onKey);
 }
 
 // ===========================================================================
@@ -1094,8 +1144,9 @@ async function renderOutputs() {
   // does NOT also toggle the cell's selection.
   grid.querySelectorAll(".eye").forEach(b => b.onclick = (e) => {
     e.stopPropagation();
-    const o = d.outputs.find(x => x.id === b.closest(".ocell").dataset.oid);
-    if (o) openSingle(o);
+    const id = b.closest(".ocell").dataset.oid;
+    const index = d.outputs.findIndex(x => x.id === id);
+    if (index >= 0) openSingle(d.outputs[index], d.outputs, index);
   });
 }
 
