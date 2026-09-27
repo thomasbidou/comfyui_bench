@@ -22,7 +22,8 @@ frontend.
 ## Features
 
 - **Model browser** — folder tree of every model under your configured roots,
-  each shown with the preview image that ships in its folder, its name, size,
+  each shown with the preview that ships in its folder (an image, or a short
+  **video** like an `.mp4` sample when there's no image), its name, size,
   Civitai metadata (author / likes / downloads), and your own **star rating +
   notes**. Search, sort, and a **⟳ refresh** button to re-scan.
 - **Run bench** — pick a workflow + any set of models + an optional prompt and
@@ -31,7 +32,9 @@ frontend.
 - **Run queue** — benches are **serialized**: only one runs at a time. Start
   another bench while one is in flight and it simply **lines up** (shown as
   `queued · #n`) and starts automatically in order when the current one
-  finishes. You can also **stop** a running bench or **drop** a queued one.
+  finishes. You can also **■ stop** a running bench (this **hard-stops** it:
+  it interrupts the current prompt *and* clears ComfyUI's pending queue, so the
+  GPU is actually freed) or **drop** a queued one.
 - **Robust execution** — a single model failing or hanging **never crashes
   the whole bench**: it's marked `error`/`timeout` and the run moves on to the
   next model. A **stall guard** detects a prompt stuck in ComfyUI's queue and
@@ -53,8 +56,10 @@ frontend.
 - Python **3.10+** (3.12 tested)
 - A **running** ComfyUI server (the app talks to its HTTP + WebSocket API; it
   does not host ComfyUI itself)
-- Models with a preview image next to the weight file (the app auto-discovers
-  the image that lives in the same folder as the `.safetensors` / `.ckpt`)
+- Models with a preview next to the weight file (the app auto-discovers the
+  preview that lives in the same folder as the `.safetensors` / `.ckpt`: an
+  image such as `.png`/`.jpg`/`.webp`, or — if there's no image — a short
+  video such as `.mp4`/`.webm`/`.mov`)
 
 ## Installation
 
@@ -160,7 +165,7 @@ variable is the model — which is exactly what you want when comparing them.
 ```
 config.py      state / config management, path allowlists, token auth
 comfy.py       ComfyUI HTTP client + live WebSocket event bridge
-models.py      model scanner (roots, previews, Civitai metadata, stars/notes)
+models.py      model scanner (roots, image/video previews, Civitai metadata, stars/notes)
 workflows.py   workflow analysis (loader/seed/prompt node detection, overrides)
 bench.py       background bench runner + live progress hub
 server.py      FastAPI app, REST routes, WebSocket, static serving
