@@ -39,7 +39,8 @@ frontend.
   the whole bench**: it's marked `error`/`timeout` and the run moves on to the
   next model. A **stall guard** detects a prompt stuck in ComfyUI's queue and
   fails that model early instead of waiting out the full per-model timeout.
-- **Outputs** — browse generated images by bench, select any of them, and
+- **Outputs** — browse generated images by bench, **Select all** (visible even
+  with nothing selected; selects the currently-filtered results), then
   **compare**: exactly 2 → a drag **slider**, 3+ → a side-by-side **grid**.
 - **Workflows** — store, rename, and delete multiple test workflows (ComfyUI
   API-format JSON prompts). Add your own at any time.
