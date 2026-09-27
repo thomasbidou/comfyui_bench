@@ -232,7 +232,12 @@ function modal(html, { wide=false } = {}) {
   box.querySelectorAll("[data-close]").forEach(b => b.onclick = closeModal);
   return box;
 }
-function closeModal() { document.getElementById("modal-root").innerHTML = ""; }
+function closeModal() {
+  const root = document.getElementById("modal-root");
+  const box = root && root.querySelector(".modal");
+  if (box && typeof box.__onclose === "function") { try { box.__onclose(); } catch {} }
+  document.getElementById("modal-root").innerHTML = "";
+}
 
 // ===========================================================================
 // PAGE: Home (bench history) — event-delegated so re-renders don't kill clicks
@@ -428,9 +433,18 @@ function renderModelGrid(models) {
   document.getElementById("m-count").textContent = `${models.length} model(s)`;
   el.innerHTML = models.map(m => {
     const sel = selModels.has(m.key) ? "sel" : "";
-    const thumb = m.preview
-      ? `<img class="thumb" loading="lazy" src="${fileUrl(m.preview)}" onerror="this.outerHTML='<div class=&quot;thumb placeholder&quot;>no image</div>'">`
-      : `<div class="thumb placeholder">no preview</div>`;
+    let thumb;
+    if (m.preview) {
+      if (m.preview_kind === "video") {
+        thumb = `<video class="thumb" muted playsinline preload="metadata"
+          src="${fileUrl(m.preview)}"
+          onerror="this.outerHTML='<div class=&quot;thumb placeholder&quot;>no preview</div>'"></video>`;
+      } else {
+        thumb = `<img class="thumb" loading="lazy" src="${fileUrl(m.preview)}" onerror="this.outerHTML='<div class=&quot;thumb placeholder&quot;>no image</div>'">`;
+      }
+    } else {
+      thumb = `<div class="thumb placeholder">no preview</div>`;
+    }
     return `<div class="mcard ${sel}" data-key="${esc(m.key)}">
       <div class="cb">${sel ? "✓" : ""}</div>
       ${thumb}
@@ -487,7 +501,11 @@ async function openModelDetail(key) {
     <div class="mh"><h2 style="margin:0">${esc(m.display_name || m.name)}</h2>
       <button class="btn small" data-close>Close ✕</button></div>
     <div class="mb2 model-detail">
-      ${m.preview ? `<img src="${fileUrl(m.preview)}">` : `<div class="thumb placeholder" style="aspect-ratio:1/1">no preview</div>`}
+      ${m.preview
+        ? (m.preview_kind === "video"
+            ? `<video src="${fileUrl(m.preview)}" controls muted loop playsinline></video>`
+            : `<img src="${fileUrl(m.preview)}">`)
+        : `<div class="thumb placeholder" style="aspect-ratio:1/1">no preview</div>`}
       <div>
         <div class="tabs">
           <button class="active" data-tab="info">Info</button>
@@ -516,6 +534,25 @@ async function openModelDetail(key) {
       </div>
     </div>`);
   const sb = document.getElementById("md-star-btns");
+  // On close, push the (possibly) updated stars back into the live grid so
+  // the change shows without a full re-scan. Only if Save actually happened —
+  // otherwise the user's unsaved fiddling is discarded and the grid reverts.
+  let saved = false;
+  const origNotes = document.getElementById("md-notes").value;
+  box.__onclose = () => {
+    if (route.name !== "models" || !document.getElementById("m-grid")) return;
+    const hit = modelState.models.find(x => x.key === key);
+    if (!hit) return;
+    if (saved) {
+      let s = 0; sb.querySelectorAll("button").forEach((b,i) => { if (b.textContent === "★") s = i+1; });
+      hit.stars = s;
+      hit.notes = document.getElementById("md-notes").value;
+    } else {
+      // revert to last-saved state
+      hit.notes = origNotes;
+    }
+    renderModelGrid(modelState.models);
+  };
   sb.innerHTML = [0,1,2,3,4].map(i =>
     `<button class="iconbtn" data-star="${i+1}" style="width:28px;height:28px">${i < (m.stars||0) ? "★" : "☆"}</button>`).join("");
   sb.querySelectorAll("button").forEach(b => b.onclick = () => {
@@ -535,6 +572,7 @@ async function openModelDetail(key) {
     let s = 0; sb.querySelectorAll("button").forEach((b,i) => { if (b.textContent === "★") s = i+1; });
     try {
       await API.patch("/models/" + encodeURIComponent(key), { notes, stars: s });
+      saved = true;
       toast("Saved");
       // reflect
       document.getElementById("md-stars").textContent = stars(s);

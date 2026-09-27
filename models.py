@@ -13,7 +13,10 @@ import os
 import time
 
 WEIGHT_EXTS = {".safetensors", ".ckpt", ".pt"}
+# A preview may be an image (preferred) or a short video (.mp4/.webm/.gif —
+# common for LoRA/checkpoint packs that ship an animated sample).
 PREVIEW_EXTS = {".jpeg", ".jpg", ".png", ".webp"}
+VIDEO_EXTS = {".mp4", ".webm", ".gif", ".mov", ".m4v"}
 
 
 def _read_json(path):
@@ -60,6 +63,14 @@ def build_model(abs_path, root):
         if os.path.isfile(cand):
             preview = cand
             break
+    preview_kind = "video" if (preview and preview.lower().endswith(tuple(VIDEO_EXTS))) else "image"
+    if preview is None:
+        for ext in VIDEO_EXTS:
+            cand = os.path.join(d, base + ext)
+            if os.path.isfile(cand):
+                preview = cand
+                preview_kind = "video"
+                break
     meta = _read_json(os.path.join(d, base + ".metadata.json")) or {}
     civ = _read_json(os.path.join(d, base + ".civitai.info")) or {}
     # .metadata.json sometimes nests the civitai block
@@ -104,6 +115,7 @@ def build_model(abs_path, root):
         "size": size,
         "modified": modified,
         "preview": preview,
+        "preview_kind": preview_kind if preview else None,
         "base_model": base_model,
         "civitai": civitai,
         "notes": "",
