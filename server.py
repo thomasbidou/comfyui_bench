@@ -315,11 +315,73 @@ def api_workflow_get(request: Request, wid: str):
     raise HTTPException(status_code=404, detail="workflow not found")
 
 
+@app.get("/api/workflows/{wid}/nodes")
+def api_workflow_nodes(request: Request, wid: str):
+    """List every node in a workflow for the node picker.
+
+    Returns [{id, class_type, editable, preview}] ordered by node id.
+    `editable` is True when the node carries a text or PromptState value.
+    `preview` is a short human-readable snippet of its inputs.
+    """
+    require_auth(request)
+    for w in _workflows():
+        if w["id"] == wid:
+            prompt = w.get("prompt") or {}
+            from workflows import read_node_text, _is_editable
+            nodes = []
+            for nid, n in prompt.items():
+                if not isinstance(n, dict):
+                    continue
+                inputs = n.get("inputs") or {}
+                # Build a compact preview: list the first few inputs with
+                # their values (truncate long strings).
+                parts = []
+                for k, v in list(inputs.items())[:6]:
+                    if isinstance(v, (list, tuple)) and len(v) == 2:
+                        continue  # link reference [src_id, src_idx]
+                    if isinstance(v, str) and len(v) > 60:
+                        v = v[:57] + "..."
+                    if isinstance(v, (dict, list)):
+                        v = f"<{type(v).__name__}>"
+                    parts.append(f"{k}={v!r}")
+                preview = "  ".join(parts)
+                if len(preview) > 140:
+                    preview = preview[:137] + "..."
+                nodes.append({
+                    "id": nid,
+                    "class_type": n.get("class_type"),
+                    "editable": _is_editable(n),
+                    "preview": preview,
+                })
+            nodes.sort(key=lambda x: int(x["id"]) if x["id"].isdigit() else 10**9)
+            return {"nodes": nodes}
+    raise HTTPException(status_code=404, detail="workflow not found")
+
+
 class WorkflowRename(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     base_seed: Optional[int] = None
     prompt_node_id: Optional[str] = None
+
+
+@app.get("/api/workflows/{wid}/nodes/{nid}/value")
+def api_workflow_node_value(request: Request, wid: str, nid: str):
+    """Return the editable text value of a node (plain text or PromptState)."""
+    require_auth(request)
+    from workflows import read_node_text
+    for w in _workflows():
+        if w["id"] == wid:
+            node = (w.get("prompt") or {}).get(str(nid))
+            if node is None:
+                raise HTTPException(404, f"node {nid} not found")
+            return {"node_id": nid, "value": read_node_text(node)}
+    raise HTTPException(status_code=404, detail="workflow not found")
+
+
+class NodeEdit(BaseModel):
+    node_id: str
+    value: Optional[str] = None
 
 
 @app.put("/api/workflows/{wid}")
@@ -336,7 +398,8 @@ def api_workflow_put(request: Request, wid: str, body: WorkflowRename):
                 w["base_seed"] = int(body.base_seed)
             if body.prompt_node_id is not None:
                 cands = (workflow_summary(w.get("prompt", {})) or {}).get("prompt_candidates") or []
-                if cands and body.prompt_node_id not in cands:
+                cand_ids = {str(c.get("id")) for c in cands if isinstance(c, dict)}
+                if cand_ids and str(body.prompt_node_id) not in cand_ids:
                     raise HTTPException(status_code=400,
                                         detail="prompt_node_id not in this workflow's candidates")
                 w["prompt_node_id"] = body.prompt_node_id
@@ -351,6 +414,30 @@ def api_workflow_del(request: Request, wid: str):
     wfs = [w for w in _workflows() if w["id"] != wid]
     _save_workflows(wfs)
     return {"ok": True}
+
+
+@app.put("/api/workflows/{wid}/node")
+def api_workflow_node_edit(request: Request, wid: str, body: NodeEdit):
+    """Persist an edited node value (prompt text) into the workflow's stored
+    prompt. Uses the shape-aware writer so plain-text nodes and PromptState
+    (Pixaroma) nodes are both handled. Also refreshes base_prompt."""
+    require_auth(request)
+    from workflows import write_node_text, read_node_text
+    wfs = _workflows()
+    for w in wfs:
+        if w["id"] == wid:
+            prompt = w.get("prompt") or {}
+            nid = str(body.node_id)
+            if nid not in prompt:
+                raise HTTPException(400, f"node {nid} not in this workflow")
+            if body.value is not None:
+                write_node_text(prompt[nid], body.value)
+                if read_node_text(prompt[nid]):
+                    w["base_prompt"] = read_node_text(prompt[nid])[:2000]
+            w["prompt"] = prompt
+            _save_workflows(wfs)
+            return {"ok": True}
+    raise HTTPException(status_code=404, detail="workflow not found")
 
 
 # ---------------------------------------------------------------------------

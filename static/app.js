@@ -610,6 +610,7 @@ async function renderWorkflows() {
       </div>
     </div>
     <div id="wf-list">${d.workflows.map(wfRow).join("") || `<div class="empty">No workflows. Upload or add one.</div>`}</div>
+    <div id="wf-editor" class="card mt hidden"></div>
     <div class="card mt hidden" id="wf-addcard"><h3>Add a workflow</h3>
       <p class="muted small">Paste a ComfyUI <b>API-format</b> prompt (JSON, the <code>prompt</code> object from a workflow — not the UI graph). It must contain a <code>CheckpointLoaderSimple</code> or <code>UNETLoaderWithName</code> node.</p>
       <label class="field"><span class="lab">Name</span><input id="wf-name" placeholder="e.g. Text to Image (Anima)"></label>
@@ -666,6 +667,7 @@ function wfRow(w) {
         </div>
       </div>
       <div class="row wrap">
+        <button class="btn small primary" data-wf-edit="${esc(w.id)}">✎ Edit nodes</button>
         <button class="btn small" data-wf-use="${esc(w.id)}">Use</button>
         <button class="btn small" data-wf-rename="${esc(w.id)}">Rename</button>
         <button class="btn small danger" data-wf-del="${esc(w.id)}">Delete</button>
@@ -678,6 +680,7 @@ function bindWfList() {
     localStorage.setItem("cb_pending_wf", b.dataset.wfUse);
     location.hash = "#/bench";
   });
+  document.querySelectorAll("[data-wf-edit]").forEach(b => b.onclick = () => openNodeEditor(b.dataset.wfEdit));
   document.querySelectorAll("[data-wf-rename]").forEach(b => b.onclick = async () => {
     const name = prompt("New workflow name:");
     if (name) { try { await API.put("/workflows/"+b.dataset.wfRename,{name}); renderWorkflows(); } catch(e){toast(e.message);} }
@@ -686,6 +689,82 @@ function bindWfList() {
     if (!confirm("Delete this workflow?")) return;
     try { await API.del("/workflows/"+b.dataset.wfDel); renderWorkflows(); } catch(e){toast(e.message);}
   });
+}
+
+// ===========================================================================
+// Node editor: pick a node, see its value, edit + save (prompt text nodes)
+// ===========================================================================
+async function openNodeEditor(wid) {
+  const view = document.getElementById("view");
+  const editor = document.getElementById("wf-editor");
+  editor.classList.remove("hidden");
+  editor.innerHTML = `<h3 style="margin:0 0 6px">Edit nodes <span class="faint small">— ${esc(wid)}</span></h3>
+    <p class="muted small">Pick a node to inspect &amp; edit its value. Text/prompt nodes (★) can be edited and saved back into this workflow.</p>
+    <div class="row wrap" style="gap:8px">
+      <select id="ne-node" style="min-width:340px;flex:1"></select>
+      <button class="btn" id="ne-default">★ Set as prompt node</button>
+    </div>
+    <div id="ne-body" class="mt"></div>`;
+  editor.scrollIntoView({ behavior: "smooth" });
+  let nodes = [];
+  try {
+    ({ nodes } = await API.get(`/workflows/${wid}/nodes`));
+  } catch (e) {
+    editor.innerHTML = `<h3>Edit nodes</h3><div class="error">${esc(e.message)}</div>`;
+    return;
+  }
+  const sel = document.getElementById("ne-node");
+  sel.innerHTML = nodes.map(n =>
+    `<option value="${esc(n.id)}" data-editable="${n.editable?1:0}">${n.editable?"★ ":""}node ${esc(n.id)} · ${esc(n.class_type||"")}</option>`
+  ).join("");
+  // Default-select the current prompt node if present.
+  try {
+    const wf = (await API.get("/workflows")).workflows.find(w => w.id === wid);
+    if (wf && wf.prompt_node_id) {
+      const opt = [...sel.options].find(o => o.value === String(wf.prompt_node_id));
+      if (opt) sel.value = opt.value;
+    }
+  } catch {}
+  const body = document.getElementById("ne-body");
+  const renderBody = async () => {
+    const id = sel.value;
+    const meta = nodes.find(n => n.id === id);
+    if (!meta) { body.innerHTML = ""; return; }
+    body.innerHTML = `<div class="pill mt">class: ${esc(meta.class_type||"—")}</div>
+      <div class="muted small mt" style="white-space:pre-wrap;font-family:ui-monospace,monospace">${esc(meta.preview||"(no scalar inputs)")}</div>`;
+    const editable = !!meta.editable;
+    if (editable) {
+      body.insertAdjacentHTML("beforeend", `
+        <label class="field mt"><span class="lab">Node value <span class="faint small">(edit &amp; save)</span></span>
+          <textarea id="ne-text" rows="6" placeholder="(empty)"></textarea></label>
+        <button class="btn primary" id="ne-save">Save value</button>`);
+      // Load the current value for this node.
+      try {
+        const r = await API.get(`/workflows/${wid}/nodes/${encodeURIComponent(id)}/value`);
+        const ta2 = document.getElementById("ne-text");
+        if (ta2) ta2.value = r.value || "";
+      } catch {
+        const ta2 = document.getElementById("ne-text");
+        if (ta2) ta2.placeholder = "(no text value)";
+      }
+      document.getElementById("ne-save").onclick = async () => {
+        const val = document.getElementById("ne-text").value;
+        try {
+          await API.put(`/workflows/${wid}/node`, { node_id: id, value: val });
+          toast(`Saved node ${id}`);
+          renderBody();
+        } catch (e) { toast(e.message); }
+      };
+    }
+  };
+  sel.onchange = renderBody;
+  document.getElementById("ne-default").onclick = async () => {
+    try {
+      await API.put(`/workflows/${wid}`, { prompt_node_id: sel.value });
+      toast(`Default prompt node set to ${sel.value}`);
+    } catch (e) { toast(e.message); }
+  };
+  renderBody();
 }
 
 // ===========================================================================

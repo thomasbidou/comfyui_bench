@@ -12,6 +12,7 @@ The user can override the prompt (base text node) and the seed at run time.
 from __future__ import annotations
 
 import copy
+import json
 import os
 import re
 
@@ -42,40 +43,96 @@ def detect_seed_nodes(prompt):
     return sorted(out)
 
 
+def _is_editable(node):
+    if not isinstance(node, dict):
+        return False
+    inputs = node.get("inputs") or {}
+    if isinstance(inputs.get("text"), str) and inputs["text"].strip():
+        return True
+    if isinstance(inputs.get("PromptState"), str) and inputs["PromptState"].strip():
+        return True
+    return False
+
+
+def read_node_text(node):
+    """Read a node's editable text, handling plain `text` and Pixaroma-style
+    `PromptState` (a JSON string like {"text":"...","order":"mine","sep":", "}")."""
+    if not isinstance(node, dict):
+        return ""
+    inputs = node.get("inputs") or {}
+    t = inputs.get("text")
+    if isinstance(t, str) and t.strip():
+        return t
+    state = inputs.get("PromptState")
+    if isinstance(state, str) and state.strip():
+        try:
+            obj = json.loads(state)
+            if isinstance(obj, dict) and isinstance(obj.get("text"), str):
+                return obj["text"]
+        except (ValueError, TypeError):
+            pass
+    return ""
+
+
+def write_node_text(node, text):
+    """Write prompt text into a node in whatever shape it actually uses —
+    plain `text` (PixaromaShowText) or a JSON `PromptState` (PixaromaPrompt).
+    Preserves order/sep on PromptState.
+    """
+    if not isinstance(node, dict):
+        return
+    inputs = node.get("inputs")
+    if inputs is None:
+        inputs = node.setdefault("inputs", {})
+    if isinstance(inputs.get("PromptState"), str) or "PromptState" in inputs:
+        obj = None
+        cur = inputs.get("PromptState")
+        if isinstance(cur, str):
+            try:
+                obj = json.loads(cur)
+            except (ValueError, TypeError):
+                obj = None
+        if not isinstance(obj, dict):
+            obj = {"text": text, "order": "mine", "sep": ", "}
+        else:
+            obj["text"] = text
+        inputs["PromptState"] = json.dumps(obj)
+    else:
+        inputs["text"] = text
+
+
 def detect_prompt_node(prompt):
-    """Find the node that holds the base prompt text.
+    """Find the node that holds the base prompt text, across node types.
 
-    Works across node types: the canonical base prompt is a `text` input
-    (a plain string) that contains the `<lora:...>` markers. We pick the
-    shortest such string (the base prompt, not an already-expanded one);
-    if none carry lora markers, fall back to the shortest non-empty `text`
-    string input that is a literal (not a link).
+    A node is *editable* if it has a plain `text` string input or a
+    Pixaroma-style `PromptState` (JSON `{"text":...}`). We pick the
+    shortest such node (the base subject prompt, not an already-expanded
+    one); the LoRA-tag holder is preferred only when nothing else matches.
 
-    CAUTION: on multi-LoRA pipelines the `<lora:...>` holder is a *LoRA
-    loader* (e.g. "Lora Loader (LoraManager)") whose `text` carries the lora
-    tags — NOT the real subject prompt. The actual subject often lives in a
-    separate custom node (e.g. PixaromaShowText) feeding a CLIPTextEncode.
-    So we also expose `prompt_candidates` (all text nodes) so the UI can let
-    the user pick the real target; the auto default stays the lora node for
-    backward compatibility.
+    `prompt_candidates` is returned so the UI can let the user pick the
+    real target on multi-LoRA pipelines.
     """
     lora_nodes = []
-    any_text = []
+    editable = []
     for nid, node in prompt.items():
-        text = (node.get("inputs") or {}).get("text")
-        if not isinstance(text, str) or not text.strip():
+        text = read_node_text(node)
+        if not text.strip():
             continue
-        any_text.append((nid, text, node.get("class_type")))
+        editable.append((nid, text, node.get("class_type")))
         if "<lora:" in text:
             lora_nodes.append((nid, text, node.get("class_type")))
-    pool = lora_nodes or any_text
+    # Prefer the SUBJECT text node (non-LoRA holder) over the LoRA-tag
+    # holder, since on multi-LoRA pipelines the lora node only carries
+    # <lora:...> tags — the real prompt is the other editable node.
+    non_lora = [c for c in editable if c not in lora_nodes]
+    pool = non_lora or lora_nodes or editable
     if not pool:
         return None, "", []
     nid, text, _ = min(pool, key=lambda c: len(c[1]))
     candidates = [
         {"id": n, "class_type": ct,
          "preview": (t[:120].replace("\n", " "))}
-        for (n, t, ct) in sorted(any_text, key=lambda c: len(c[1]))
+        for (n, t, ct) in sorted(editable, key=lambda c: len(c[1]))
     ]
     return nid, text, candidates
 
@@ -130,8 +187,17 @@ def apply_overrides(prompt, model_name, workflow, seed=None, prompt_text=None,
             if nid in p and "seed" in p[nid].get("inputs", {}):
                 p[nid]["inputs"]["seed"] = int(seed)
     target = prompt_node_id or workflow.get("prompt_node_id")
-    if prompt_text is not None and target and target in p:
-        p[target]["inputs"]["text"] = prompt_text
+    if prompt_text is not None:
+        if target is not None and str(target) in p:
+            write_node_text(p[str(target)], prompt_text)
+        else:
+            # Fall back to the first editable node in numeric order.
+            cands = [
+                nid for nid, n in p.items() if _is_editable(n)
+            ]
+            if cands:
+                pick = min(cands, key=lambda s: int(s) if str(s).isdigit() else 10**9)
+                write_node_text(p[pick], prompt_text)
     return p
 
 
@@ -185,7 +251,19 @@ def convert_ui_to_api(ui_graph, comfy_base="http://127.0.0.1:8188"):
         if not ct:
             continue
         order = _input_order(object_info.get(ct))
-        linked_slots = set((n.get("links") or {}).keys())  # slot indices
+        # A slot is "linked" (carries a node-to-node connection) when its
+        # `inputs[].link` is set. The slot index is the position in the
+        # node's `inputs` array (ComfyUI convention). These slots are filled
+        # from the link table below, NOT from widgets_values.
+        linked_slots = set()
+        for idx, inp in enumerate(n.get("inputs") or []):
+            if isinstance(inp, dict) and inp.get("link") is not None:
+                linked_slots.add(idx)
+        for slot, _lk in (n.get("links") or {}).items():  # {slot: link_id}
+            try:
+                linked_slots.add(int(slot))
+            except (TypeError, ValueError):
+                pass
         widgets = n.get("widgets_values")
         if not isinstance(widgets, list):
             widgets = []
