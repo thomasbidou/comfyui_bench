@@ -41,7 +41,9 @@ frontend.
   fails that model early instead of waiting out the full per-model timeout.
 - **Outputs** — browse generated images by bench, **Select all** (visible even
   with nothing selected; selects the currently-filtered results), then
-  **compare**: exactly 2 → a drag **slider**, 3+ → a side-by-side **grid**.
+  **compare**: exactly 2 → a drag **slider**, 3+ → a responsive **grid** —
+  both open in a **full-window** view for close inspection. Every thumbnail has
+  a translucent **👁 eye** button to open that single image full-size.
 - **Workflows** — store, rename, and delete multiple test workflows (ComfyUI
   API-format JSON prompts). Add your own at any time.
 - **Home / history** — every bench you've run, with status and quick links to
