@@ -52,6 +52,15 @@ def ensure_state():
         if not os.path.exists(p):
             default = {} if ("benches" in p or "meta" in p) else []
             atomic_write_json(p, default)
+    # Repair a user_meta.json that was ever written as a list (older versions
+    # seeded it with []). merge_user_meta() expects a dict keyed by model key.
+    try:
+        with open(USER_META_PATH, "r", encoding="utf-8") as f:
+            cur = json.load(f)
+        if not isinstance(cur, dict):
+            atomic_write_json(USER_META_PATH, {})
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        atomic_write_json(USER_META_PATH, {})
 
 
 def atomic_write_json(path, obj):
