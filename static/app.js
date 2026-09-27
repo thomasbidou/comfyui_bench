@@ -236,10 +236,12 @@ function toggleTheme() {
 // ---------------------------------------------------------------------------
 // Modal
 // ---------------------------------------------------------------------------
+let modalZ = 80; // base .modal-back z-index; each new modal stacks strictly above the previous
 function modal(html, { wide=false, full=false } = {}) {
   const root = document.getElementById("modal-root");
   const back = document.createElement("div");
   back.className = "modal-back" + (full ? " full" : "");
+  back.style.zIndex = ++modalZ; // topmost backdrop is always the highest (defensive)
   const box = document.createElement("div");
   box.className = "modal" + (wide ? " wide" : "") + (full ? " full" : "");
   box.innerHTML = html;
@@ -250,10 +252,19 @@ function modal(html, { wide=false, full=false } = {}) {
   return box;
 }
 function closeModal() {
+  // Close ONLY the topmost modal (last appended backdrop), and run only ITS
+  // __onclose. Backwards-compatible: with a single modal this is identical
+  // to the old "wipe the whole root" behavior.
   const root = document.getElementById("modal-root");
-  const box = root && root.querySelector(".modal");
-  if (box && typeof box.__onclose === "function") { try { box.__onclose(); } catch {} }
-  document.getElementById("modal-root").innerHTML = "";
+  if (!root) return;
+  const backs = root.querySelectorAll(":scope > .modal-back");
+  const top = backs[backs.length - 1];
+  if (!top) return;
+  const box = top.querySelector(".modal");
+  if (box && typeof box.__onclose === "function") {
+    try { box.__onclose(); } catch (e) { console.warn("modal __onclose failed", e); }
+  }
+  top.remove();
 }
 
 // ===========================================================================
@@ -662,10 +673,25 @@ function openCompare(items) {
     wrap.addEventListener("pointerup", () => dragging = false);
     wrap.addEventListener("pointercancel", () => dragging = false);
   } else {
-    body.innerHTML = `<div class="cmp-grid">` + items.map(o => `
-      <figure><img loading="lazy" src="${fileUrl(o.output)}">
-      <figcaption><b>${esc(o.model_name||"")}</b><br>${esc(o.workflow_name||"")} · seed ${esc(o.seed??"—")}<br>${new Date(o.created*1000).toLocaleString()}</figcaption>
+    body.innerHTML = `<div class="cmp-grid">` + items.map((o, i) => `
+      <figure data-i="${i}">
+        <button class="eye" type="button" title="View full size" aria-label="View full size">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5C21.27 7.61 17 4.5 12 4.5zM12 17a5 5 0 110-10 5 5 0 010 10zm0-8a3 3 0 100 6 3 3 0 000-6z"/>
+          </svg>
+        </button>
+        <img loading="lazy" src="${fileUrl(o.output)}">
+        <figcaption><b>${esc(o.model_name||"")}</b><br>${esc(o.workflow_name||"")} · seed ${esc(o.seed??"—")}<br>${new Date(o.created*1000).toLocaleString()}</figcaption>
       </figure>`).join("") + `</div>`;
+    // 👁 eye per figure: open that single image full-window ON TOP of the
+    // still-open compare (closeModal() now removes only the topmost).
+    body.querySelectorAll(".cmp-grid figure .eye").forEach(b => {
+      b.onclick = (e) => {
+        e.stopPropagation();
+        const o = items[+b.closest("figure").dataset.i];
+        if (o) openSingle(o);
+      };
+    });
   }
 }
 

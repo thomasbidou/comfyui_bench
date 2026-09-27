@@ -210,4 +210,12 @@ label.field .lab{font-size:12.5px;color:var(--dim);font-weight:600;margin-bottom
 .modal.full .mb2.single img{max-width:100%;max-height:calc(100vh - 150px);
   object-fit:contain;background:#000;border-radius:var(--radius-s);border:1px solid var(--border)}
 .modal.full .mb2.single .cap{display:flex;flex-wrap:wrap;gap:8px 18px;justify-content:center;font-size:13px}
+
+/* 👁 eye overlay on 3+ compare-grid figures — mirrors .ocell .eye; figure needs a containing block */
+.cmp-grid figure{position:relative}
+.cmp-grid .eye{position:absolute;top:8px;left:8px;z-index:3;width:30px;height:30px;
+  border-radius:50%;border:1px solid rgba(255,255,255,.55);background:rgba(0,0,0,.35);
+  color:#fff;display:grid;place-items:center;cursor:pointer;padding:0;
+  opacity:.45;transition:opacity .12s,transform .12s,background .12s}
+.cmp-grid .eye:hover{opacity:1;transform:scale(1.08);background:rgba(0,0,0,.6)}
 code{background:var(--bg2);padding:1px 5px;border-radius:4px;font-family:ui-monospace,monospace;font-size:12.5px}
