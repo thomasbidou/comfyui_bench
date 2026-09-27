@@ -460,21 +460,25 @@ function toggleSel(key) {
 function updateSelbar() {
   const bar = document.getElementById("m-selbar");
   if (!bar) return;
-  if (!selModels.size) { bar.classList.add("hidden"); bar.innerHTML=""; return; }
+  // Always show the bar so "Select all" is reachable with nothing selected yet.
+  // "Clear" / "Run bench" only make sense once something is selected.
   bar.classList.remove("hidden");
+  const hasSel = selModels.size > 0;
   bar.innerHTML = `<span class="grow"><b>${selModels.size}</b> selected</span>
     <button class="btn small" id="sel-all">Select all</button>
-    <button class="btn small" id="sel-none">Clear</button>
-    <button class="btn primary" id="sel-run">▶ Run bench</button>`;
+    ${hasSel ? `<button class="btn small" id="sel-none">Clear</button>
+    <button class="btn primary" id="sel-run">▶ Run bench</button>` : ""}`;
   document.getElementById("sel-all").onclick = () => {
     modelState.models.forEach(m => selModels.add(m.key));
     renderModelGrid(modelState.models);
   };
-  document.getElementById("sel-none").onclick = () => { selModels.clear(); renderModelGrid(modelState.models); };
-  document.getElementById("sel-run").onclick = () => {
-    localStorage.setItem("cb_pending_models", JSON.stringify([...selModels]));
-    location.hash = "#/bench";
-  };
+  if (hasSel) {
+    document.getElementById("sel-none").onclick = () => { selModels.clear(); renderModelGrid(modelState.models); };
+    document.getElementById("sel-run").onclick = () => {
+      localStorage.setItem("cb_pending_models", JSON.stringify([...selModels]));
+      location.hash = "#/bench";
+    };
+  }
 }
 
 async function openModelDetail(key) {
@@ -866,9 +870,12 @@ async function renderBench() {
   // ---- model list ----
   const rList = document.getElementById("r-list");
   const set = new Set(pendingModels);
-  const renderList = (filter="") => {
+  const filteredRows = (filter="") => {
     const q = (filter||"").toLowerCase();
-    const rows = models.models.filter(m => !q || m.name.toLowerCase().includes(q) || (m.display_name||"").toLowerCase().includes(q));
+    return models.models.filter(m => !q || m.name.toLowerCase().includes(q) || (m.display_name||"").toLowerCase().includes(q));
+  };
+  const renderList = (filter="") => {
+    const rows = filteredRows(filter);
     rList.innerHTML = rows.map(m => `<label class="row" style="padding:6px 10px;border-bottom:1px solid var(--border)">
       <input type="checkbox" value="${esc(m.key)}" ${set.has(m.key)?"checked":""} style="width:auto">
       <span class="grow" style="font-size:13px">${esc(m.display_name||m.name)} <span class="faint small">· ${esc(m.folder||"/")}</span></span>
@@ -880,7 +887,7 @@ async function renderBench() {
     });
   };
   document.getElementById("r-q").oninput = e => renderList(e.target.value);
-  document.getElementById("r-all").onclick = () => { models.models.forEach(m => set.add(m.key)); renderList(document.getElementById("r-q").value); };
+  document.getElementById("r-all").onclick = () => { filteredRows(document.getElementById("r-q").value).forEach(m => set.add(m.key)); renderList(document.getElementById("r-q").value); };
   document.getElementById("r-none").onclick = () => { set.clear(); renderList(document.getElementById("r-q").value); };
   renderList();
 
