@@ -56,6 +56,23 @@ function toast(msg, ms=3200) {
   setTimeout(()=>{ el.style.opacity="0"; el.style.transition="opacity .4s";
     setTimeout(()=>el.remove(),400); }, ms);
 }
+// Clipboard that works in secure AND non-secure contexts (the app is served
+// over http:// on the LAN/Tailscale IP, where navigator.clipboard is undefined).
+// Tries the modern API first, then falls back to document.execCommand.
+async function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try { await navigator.clipboard.writeText(text); return true; } catch {}
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.focus(); ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  return ok;
+}
 
 // ---------------------------------------------------------------------------
 // Live WS + bench indicator (lingers ~60s after completion)
@@ -1066,8 +1083,9 @@ async function renderSetup() {
   const tok = await getToken();
   document.getElementById("s-token").textContent = tok || "(hidden)";
   document.getElementById("s-copy").onclick = async () => {
-    try { await navigator.clipboard.writeText(tok); toast("Copied"); }
-    catch { toast("Copy failed"); }
+    if (!tok) { toast("No token to copy"); return; }
+    const ok = await copyToClipboard(tok);
+    toast(ok ? "Copied" : "Copy failed — select the text and press Ctrl/Cmd+C");
   };
   document.getElementById("s-regen").onclick = async () => {
     if (!confirm("Regenerate the token? Existing sessions will be logged out.")) return;
