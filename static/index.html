@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ComfyUI Bench</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%2389b4fa'/><text x='16' y='22' font-size='18' text-anchor='middle' fill='%230b0d12' font-family='sans-serif' font-weight='bold'>C</text></svg>">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- login screen -->
+  <div id="login" class="login-wrap hidden">
+    <div class="login">
+      <div class="logo">C</div>
+      <h1 style="margin:0 0 4px">ComfyUI Bench</h1>
+      <p class="muted small" id="login-sub">Enter the access token to continue.</p>
+      <div class="nsfw-banner hidden" id="login-nsfw">This service hosts NSFW content. Authorized users only.</div>
+      <div class="mt">
+        <label class="field"><span class="lab">Access token</span>
+          <input id="login-token" type="password" placeholder="paste token" autocomplete="off">
+        </label>
+        <button class="btn primary" id="login-btn" style="width:100%">Unlock</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- main app -->
+  <div id="shell" class="hidden" style="display:flex;flex-direction:column;min-height:100vh">
+    <header class="topbar">
+      <div class="brand"><div class="logo">C</div>ComfyUI Bench</div>
+      <nav class="nav" id="nav">
+        <a href="#/home">Home</a>
+        <a href="#/models">Models</a>
+        <a href="#/workflows">Workflows</a>
+        <a href="#/outputs">Outputs</a>
+        <a href="#/bench">Run bench</a>
+        <a href="#/setup">Setup</a>
+      </nav>
+      <div id="bench-indicator" class="bench-indicator hidden"></div>
+      <button class="iconbtn" id="theme-btn" title="Toggle theme">◐</button>
+    </header>
+    <main class="main" id="view"></main>
+  </div>
+</div>
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

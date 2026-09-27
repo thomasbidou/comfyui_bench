@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# App runtime state (contains the auth token, benches, outputs, cached model list).
+# Regenerated at first run — never commit this.
+state/
+
+# Local dev / editor
+.DS_Store
+*.log
+.idea/
+.vscode/
