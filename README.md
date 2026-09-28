@@ -49,15 +49,41 @@ frontend.
   there use **← / → keys or the on-screen arrows** to step through the set
   (all filtered outputs, or just the compared images when opened from the
   compare grid), with a **N / M** counter.
+- **LoRA browser** — a dedicated **LoRAs** page: a folder tree of every LoRA
+  under your configured LoRA roots, each with its preview, name, size, Civitai
+  metadata, and **star rating + notes**. Search, sort, and refresh; a **cached
+  index** (`state/loras.json`) keeps the page fast even with thousands of
+  files. Select LoRAs and hit **▶ Bench** to jump straight into a LoRA bench
+  with that LoRA pre-loaded.
+- **LoRA strength-sweep bench** — a second bench tab (**Run Bench → LoRA**)
+  that pins one **base model** + one **LoRA** and sweeps the LoRA
+  **strength** from a min to a max in fixed steps (e.g. 0 → 1 in 0.3 steps),
+  generating one image per strength so you can dial in the right LoRA weight.
+  The base model, the LoRA, and the strengths are all configurable; a
+  **default base model** (set on the Setup page) is pre-selected for you.
 - **Workflows** — store, rename, and delete multiple test workflows (ComfyUI
-  API-format JSON prompts). Add your own at any time.
+  API-format JSON prompts). On add/upload, if the workflow contains LoRA
+  nodes you choose its **intent**: a **Model workflow** (kept as-is, usable
+  for the model bench even though it carries LoRA nodes) or a **LoRA-bench
+  workflow** (then pick which node the bench sweeps). A workflow with LoRA
+  nodes can therefore live as a model workflow.
 - **Home / history** — every bench you've run, with status and quick links to
   its outputs.
-- **Setup page** — ComfyUI URL, model roots, output root, default seed,
-  dark/light theme, and the access token (copy / regenerate).
+- **Setup page** — ComfyUI URL, model roots, LoRA roots, output root, default
+  seed, **default base model for the LoRA bench**, dark/light theme, and the
+  access token (copy / regenerate).
 - **Dark mode** — on by default, toggleable, remembered per browser.
 - **Token auth** — a single access token gates the UI so it's safe to expose on
   a trusted LAN.
+
+> ### 🔎 Known issue — LoRA bench produces no output (open)
+> A LoRA strength-sweep bench currently **completes without producing images**
+> when run from the UI. The sweep logic, output-capture, and config wiring are
+> all in place and unit-verified, but an end-to-end run reported "no output."
+> Root cause still to be diagnosed (suspect: output capture not matching the
+> generated `SaveImage` node, or the base model + LoRA pairing failing at
+> prompt time). **Do not treat the LoRA bench as done until this is fixed and
+> re-verified end-to-end.**
 
 ## Requirements
 
@@ -174,7 +200,8 @@ variable is the model — which is exactly what you want when comparing them.
 config.py      state / config management, path allowlists, token auth
 comfy.py       ComfyUI HTTP client + live WebSocket event bridge
 models.py      model scanner (roots, image/video previews, Civitai metadata, stars/notes)
-workflows.py   workflow analysis (loader/seed/prompt node detection, overrides)
+loras.py       LoRA scanner (same as models.py, LoRA roots + cached index)
+workflows.py   workflow analysis (loader/seed/prompt node detection, LoRA intent, overrides)
 bench.py       background bench runner + live progress hub
 server.py      FastAPI app, REST routes, WebSocket, static serving
 static/        index.html, style.css, app.js  (the SPA — no build step)

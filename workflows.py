@@ -22,6 +22,20 @@ LOADER_FIELDS = {
     CHECKPOINT_LOADER: "ckpt_name",
     UNET_LOADER: "unet_name",
 }
+# LoRA loader nodes: a strength-sweep bench targets one of these. LoraLoader
+# has strength_model + strength_clip; LoraLoaderModelOnly has strength_model
+# only (NO strength_clip). "Lora Loader (LoraManager)" carries its loras as
+# a baked-in widget list (no lora_name/strength_* fields) — it marks a
+# workflow as kind='lora' but is NOT strength-sweepable.
+LORA_LOADERS = ("LoraLoader", "LoraLoaderModelOnly", "Lora Loader (LoraManager)")
+# Only the standard loaders expose lora_name/strength_model (+strength_clip),
+# so only these support the strength-sweep bench.
+SWEEPABLE_LORA_LOADERS = ("LoraLoader", "LoraLoaderModelOnly")
+
+
+def is_sweepable_loader(class_type):
+    """True if a detected lora loader node supports a strength sweep."""
+    return class_type in SWEEPABLE_LORA_LOADERS
 
 
 def detect_model_loader(prompt):
@@ -31,6 +45,16 @@ def detect_model_loader(prompt):
         if ct in LOADER_FIELDS:
             return nid, ct, LOADER_FIELDS[ct]
     return None, None, None
+
+
+def detect_lora_loader(prompt):
+    """Return (node_id, class_type) of the first LoraLoader* node, or
+    (None, None). First match in dict order wins."""
+    for nid, node in prompt.items():
+        ct = node.get("class_type")
+        if ct in LORA_LOADERS:
+            return nid, ct
+    return None, None
 
 
 def detect_seed_nodes(prompt):
@@ -195,6 +219,107 @@ def apply_overrides(prompt, model_name, workflow, seed=None, prompt_text=None,
             cands = [
                 nid for nid, n in p.items() if _is_editable(n)
             ]
+            if cands:
+                pick = min(cands, key=lambda s: int(s) if str(s).isdigit() else 10**9)
+                write_node_text(p[pick], prompt_text)
+    return p
+
+
+def strength_steps(min_s, max_s, inc):
+    """LoRA strength-sweep ladder: min_s, min_s+inc, ... clamped so the last
+    step lands exactly on max_s (the clamp rule).
+
+    Rules (all enforced):
+      * inc <= 0                          -> ValueError("increment must be > 0")
+      * min_s > max_s                     -> ValueError("min strength must be <= max strength")
+      * steps built upward from min_s by inc, each value round(v, 4)
+      * stop when a generated value >= max_s; if the last value is still
+        < max_s, append round(max_s, 4) as the final step
+      * min_s == max_s -> [round(min_s, 4)] (exactly one step)
+      * dedupe consecutive duplicates
+      * more than 100 steps               -> ValueError("too many strength steps (max 100)")
+    """
+    if inc <= 0:
+        raise ValueError("increment must be > 0")
+    if min_s > max_s:
+        raise ValueError("min strength must be <= max strength")
+
+    steps = []
+    v = float(min_s)
+    while True:
+        rv = round(v, 4)
+        if rv >= max_s:
+            break  # stop here; do NOT append an overshoot — clamp below
+        if not steps or steps[-1] != rv:
+            steps.append(rv)
+        v += inc
+    # Clamp: guarantee the final step is exactly max_s (last image at max).
+    # Covers min==max (steps still empty) and any non-aligned increment.
+    if not steps or steps[-1] < round(max_s, 4):
+        steps.append(round(max_s, 4))
+
+    if len(steps) > 100:
+        raise ValueError("too many strength steps (max 100)")
+    return steps
+
+
+def apply_lora_overrides(prompt, workflow, model_name, lora_name, strength,
+                         seed=None, prompt_text=None, prompt_node_id=None,
+                         strength_clip=None, lora_node_id=None):
+    """Return a deep copy of `prompt` with:
+      * the fixed base model set on the model loader node
+      * the LoRA (name + strength_model [+ strength_clip for LoraLoader])
+        set on the target LoraLoader node
+      * the seed + prompt overrides applied exactly like apply_overrides
+
+    `strength_clip` defaults to `strength` when None. LoraLoaderModelOnly
+    gets NO strength_clip field (it doesn't have one).
+
+    `lora_node_id` (if given and present in the prompt) is the AUTHORITATIVE
+    target node — the workflow's stored designation (user-picked at
+    upload time). When None/absent, falls back to detect_lora_loader
+    (first match in dict order).
+    """
+    p = copy.deepcopy(prompt)
+
+    # Fixed base model on the loader node.
+    mnode = workflow.get("model_node_id")
+    mfield = workflow.get("model_field")
+    if mnode and mfield and mnode in p:
+        p[mnode]["inputs"][mfield] = model_name
+
+    # LoRA node: stored designation first, auto-detect as fallback.
+    lnode, lct = detect_lora_loader(p)
+    if lora_node_id is not None and str(lora_node_id) in p \
+            and isinstance(p.get(str(lora_node_id)), dict):
+        lnode = str(lora_node_id)
+        lct = p[lnode].get("class_type")
+    if lnode is not None and lct is not None:
+        if not is_sweepable_loader(lct):
+            raise ValueError(
+                "lora node type %r is not a standard LoraLoader; "
+                "strength sweep unsupported" % lct)
+        ins = p[lnode].setdefault("inputs", {})
+        ins["lora_name"] = lora_name
+        ins["strength_model"] = float(strength)
+        sc = float(strength_clip) if strength_clip is not None else float(strength)
+        if lct == "LoraLoader":
+            ins["strength_clip"] = sc
+        # LoraLoaderModelOnly: no strength_clip.
+
+    # Seed (same as apply_overrides).
+    if seed is not None:
+        for nid in workflow.get("seed_node_ids", []):
+            if nid in p and "seed" in p[nid].get("inputs", {}):
+                p[nid]["inputs"]["seed"] = int(seed)
+
+    # Prompt text (same as apply_overrides).
+    target = prompt_node_id or workflow.get("prompt_node_id")
+    if prompt_text is not None:
+        if target is not None and str(target) in p:
+            write_node_text(p[str(target)], prompt_text)
+        else:
+            cands = [nid for nid, n in p.items() if _is_editable(n)]
             if cands:
                 pick = min(cands, key=lambda s: int(s) if str(s).isdigit() else 10**9)
                 write_node_text(p[pick], prompt_text)

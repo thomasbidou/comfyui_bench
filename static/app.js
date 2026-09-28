@@ -147,7 +147,7 @@ async function refreshIndicator() {
 // ---------------------------------------------------------------------------
 const route = { name: "home", params: {}, query: {} };
 const PAGES = {
-  home: renderHome, models: renderModels, workflows: renderWorkflows,
+  home: renderHome, models: renderModels, loras: renderLoras, workflows: renderWorkflows,
   bench: renderBench, outputs: renderOutputs, setup: renderSetup,
 };
 function parseRoute() {
@@ -315,7 +315,7 @@ function benchClickHandler(e) {
     }
     if (act === "view") {
       e.stopPropagation();
-      location.hash = "#/outputs?bench=" + encodeURIComponent(bid);
+      location.hash = btn.dataset.out || ("#/outputs?bench=" + encodeURIComponent(bid));
       return;
     }
     if (act === "stop") {
@@ -326,8 +326,9 @@ function benchClickHandler(e) {
       return;
     }
   }
-  // row click -> outputs for this bench
-  location.hash = "#/outputs?bench=" + encodeURIComponent(bid);
+  // row click -> outputs for this bench (LoRA benches land on the LoRA tab)
+  const bk = row.dataset.bk || "model";
+  location.hash = "#/outputs?bench=" + encodeURIComponent(bid) + (bk === "lora" ? "&kind=lora" : "");
 }
 function benchRow(b) {
   const pct = b.total ? Math.min(100, Math.round(100*b.done/b.total)) : 0;
@@ -345,16 +346,21 @@ function benchRow(b) {
   const stopBtn = (b.active || b.queued)
     ? `<button class="btn small danger" data-act="stop" data-bid="${esc(b.id)}" title="Stop the run (aborts remaining models in ComfyUI)${b.queued ? ' (drop from queue)' : ''}">■ stop</button>`
     : "";
-  return `<div class="benchrow" data-bid="${esc(b.id)}">
+  const isLora = (b.kind || "model") === "lora";
+  const kindBadge = isLora
+    ? `<span class="badge lora" title="LoRA strength sweep">LoRA${(b.strength_min!=null && b.strength_max!=null) ? ` ${Number(b.strength_min).toFixed(2)}–${Number(b.strength_max).toFixed(2)}` : ""}</span>`
+    : "";
+  const outHref = "#/outputs?bench=" + encodeURIComponent(b.id) + (isLora ? "&kind=lora" : "");
+  return `<div class="benchrow" data-bid="${esc(b.id)}" data-bk="${isLora ? "lora" : "model"}">
     <div style="min-width:150px">
-      <div class="title">${esc(b.workflow_name||"bench")}</div>
-      <div class="sub">${new Date(b.created*1000).toLocaleString()} · ${b.total} model(s) · seed ${esc(b.seed??"—")}</div>
+      <div class="title">${esc(b.workflow_name||"bench")} ${kindBadge}</div>
+      <div class="sub">${new Date(b.created*1000).toLocaleString()} · ${isLora ? b.total + " strength step(s)" : b.total + " model(s)"} · seed ${esc(b.seed??"—")}</div>
     </div>
     <div class="progressbar"><div style="width:${pct}%"></div></div>
     <div class="pct">${b.done}/${b.total}</div>
     ${badge}
     ${stopBtn}
-    <button class="btn small" data-act="view" data-bid="${esc(b.id)}">Outputs</button>
+    <button class="btn small" data-act="view" data-bid="${esc(b.id)}" data-out="${esc(outHref)}">Outputs</button>
     <button class="btn small danger" data-act="del" data-bid="${esc(b.id)}">✕</button>
   </div>`;
 }
@@ -364,6 +370,12 @@ function benchRow(b) {
 // ===========================================================================
 let selModels = new Set();
 let modelState = { root: "", folder: "", q: "", sort: "name", models: [] };
+let selLoras = new Set();
+let loraState = { root: "", folder: "", q: "", sort: "name", loras: [], rendered: 0 };
+// Bench-card-local LoRA picker state (separate from loraState so the
+// LoRAs page and the bench card can coexist without clobbering each other).
+let lbLora = { root: "", folder: "", q: "", sort: "name", loras: [], rendered: 0, selected: "", total: 0 };
+const LORA_CHUNK = 200; // render in chunks — a LoRA folder can hold thousands of files
 
 async function renderModels() {
   const view = document.getElementById("view");
@@ -416,14 +428,15 @@ async function loadTree() {
   const first = el.querySelector(".node.root");
   if (first) { first.classList.add("sel"); modelState.root = first.dataset.root; loadModels(); }
 }
+const CNT = "_cnt"; // must match server TREE_CNT
 function renderTree(node, ctx) {
-  // ctx === null  -> top level: each key is a full model-ROOT path.
+  // ctx === null  -> top level: each key is a full ROOT path.
   // ctx = {root, parts} -> nested folders; parts are RELATIVE folder segments.
   let out = "";
-  const keys = Object.keys(node).sort((a, b) => a.localeCompare(b));
+  const keys = Object.keys(node).filter((k) => k !== CNT).sort((a, b) => a.localeCompare(b));
   for (const k of keys) {
     const child = node[k] || {};
-    const hasKids = Object.keys(child).length > 0;
+    const hasKids = Object.keys(child).filter((x) => x !== CNT).length > 0;
     let isRoot, label, dataRoot, folder, childParts;
     if (ctx === null) {
       isRoot = true; label = k.split("/").pop() || k;
@@ -434,17 +447,17 @@ function renderTree(node, ctx) {
       folder = ctx.parts.concat([k]).join("/");
       childParts = folder.split("/");
     }
-    const cnt = countLeaves(child);
+    const cnt = (child[CNT] != null) ? child[CNT] : countLeaves(child);
     out += `<div class="node ${isRoot ? "root" : ""}" data-root="${esc(dataRoot)}" data-folder="${esc(folder)}">
       <span class="tw">${hasKids ? "▸" : ""}</span> ${esc(label)} <span class="cnt">${cnt}</span></div>`;
     if (hasKids) out += `<ul>${renderTree(child, { root: dataRoot, parts: childParts })}</ul>`;
   }
   return out;
 }
-function countLeaves(node) {
-  const keys = Object.keys(node);
+function countLeaves(node) { // backward-compat fallback (used when a node lacks CNT)
+  const keys = Object.keys(node).filter((k) => k !== CNT);
   if (!keys.length) return 1;
-  return keys.reduce((s,k) => s + countLeaves(node[k]), 0);
+  return keys.reduce((s, k) => s + countLeaves(node[k]), 0);
 }
 async function loadModels() {
   const params = new URLSearchParams();
@@ -635,6 +648,400 @@ async function renderModelOutputs(el, m) {
 }
 
 // ===========================================================================
+// Shared Models/LoRAs kind tabs (Workflows, Outputs, Run Bench)
+// Driven by the HASH QUERY so tab state is back-button-able & shareable.
+// ===========================================================================
+function kindTabsHTML(active) {
+  return `<div class="tabs" id="kind-tabs">
+    <button data-kind="model" class="${active === "model" ? "active" : ""}">Models</button>
+    <button data-kind="lora" class="${active === "lora" ? "active" : ""}">LoRAs</button>
+  </div>`;
+}
+function bindKindTabs(active, onSwitch) {
+  const bar = document.getElementById("kind-tabs");
+  if (!bar) return;
+  bar.querySelectorAll("button").forEach(b => {
+    b.onclick = () => { const k = b.dataset.kind; if (k !== active) onSwitch(k); };
+  });
+}
+
+// ===========================================================================
+// PAGE: LoRAs (mirrors Models — different endpoint + l- prefixed ids)
+// ===========================================================================
+async function renderLoras() {
+  const view = document.getElementById("view");
+  view.innerHTML = `<div class="grid2">
+      <div class="card"><div class="row space mb">
+        <h2 style="margin:0">Folders</h2>
+        <button class="btn small" id="l-refresh" title="Re-scan LoRA roots">⟳ refresh</button>
+      </div><div class="tree" id="l-tree"><span class="spin2"></span>&nbsp; loading…</div></div>
+      <div>
+        <div class="card">
+          <div class="toolbar">
+            <input class="search" id="l-q" placeholder="Search LoRAs…" value="${esc(loraState.q)}">
+            <select id="l-sort" style="width:auto">
+              <option value="name">Sort: name</option>
+              <option value="display">Sort: display name</option>
+              <option value="stars">Sort: stars</option>
+              <option value="date">Sort: newest</option>
+              <option value="size">Sort: size</option>
+            </select>
+            <span class="muted small" id="l-count"></span>
+          </div>
+          <div id="l-selbar" class="selcount hidden"></div>
+          <div class="mgrid" id="l-grid"></div>
+          <div class="row mt" id="l-more-row"></div>
+        </div>
+      </div>
+    </div>`;
+  document.getElementById("l-sort").value = loraState.sort;
+  document.getElementById("l-q").oninput = (e) => { loraState.q = e.target.value; loadLoras(); };
+  document.getElementById("l-sort").onchange = (e) => { loraState.sort = e.target.value; loadLoras(); };
+  document.getElementById("l-refresh").onclick = async () => {
+    toast("Re-scanning…");
+    try { const r = await API.post("/loras/refresh"); toast(`Found ${r.count} LoRAs`); loadLoraTree(); loadLoras(); }
+    catch (e) { toast(e.message); }
+  };
+  loadLoraTree();
+  loadLoras();
+}
+async function loadLoraTree() {
+  const tree = await API.get("/loras/tree");
+  const el = document.getElementById("l-tree");
+  el.innerHTML = renderTree(tree.tree, null);
+  el.querySelectorAll(".node").forEach(n => n.onclick = () => {
+    el.querySelectorAll(".node").forEach(x => x.classList.remove("sel"));
+    n.classList.add("sel");
+    loraState.root = n.dataset.root || "";
+    loraState.folder = n.dataset.folder || "";
+    loadLoras();
+  });
+  // default-select the first root
+  const first = el.querySelector(".node.root");
+  if (first) { first.classList.add("sel"); loraState.root = first.dataset.root; loadLoras(); }
+}
+
+// ---------------------------------------------------------------------------
+// Lora Bench card: folder-tree + filtered list picker (bench-local state).
+// Mirrors the LoRAs page tree/list patterns but feeds a hidden #lb-lora
+// input (single selection, no multi-select).
+// ---------------------------------------------------------------------------
+function lbSelectTreeNode(el, n) {
+  el.querySelectorAll(".node").forEach(x => x.classList.remove("sel"));
+  n.classList.add("sel");
+  lbLora.root = n.dataset.root || "";
+  lbLora.folder = n.dataset.folder || "";
+  loadLbLoras();
+}
+async function loadLbLoraTree() {
+  const el = document.getElementById("lb-ltree");
+  let tree;
+  try { tree = await API.get("/loras/tree"); }
+  catch (e) { el.innerHTML = `<span class="muted">${esc(e.message)}</span>`; return; }
+  el.innerHTML = renderTree(tree.tree, null);
+  el.querySelectorAll(".node").forEach(n => n.onclick = () => lbSelectTreeNode(el, n));
+  // default-select the first root (loads its list)
+  const first = el.querySelector(".node.root");
+  if (first) { first.classList.add("sel"); lbLora.root = first.dataset.root; }
+  await loadLbLoras();
+}
+async function loadLbLoras() {
+  const params = new URLSearchParams();
+  if (lbLora.root) params.set("root", lbLora.root);
+  if (lbLora.folder) params.set("folder", lbLora.folder);
+  if (lbLora.q) params.set("q", lbLora.q);
+  params.set("sort", lbLora.sort || "name");
+  params.set("limit", String(LORA_CHUNK));
+  params.set("offset", "0");
+  let d;
+  try { d = await API.get("/loras?" + params.toString()); }
+  catch (e) { lbLora.loras = []; lbLora.total = 0; lbLora.rendered = 0; renderLbLoraList(); return; }
+  lbLora.loras = d.loras || [];
+  lbLora.total = d.total != null ? d.total : lbLora.loras.length;
+  lbLora.rendered = LORA_CHUNK;
+  renderLbLoraList();
+}
+function lbSetSelectedLora(key) {
+  lbLora.selected = key;
+  const hidden = document.getElementById("lb-lora");
+  if (hidden) {
+    hidden.value = key;
+    // renderBench() binds a "change" listener on this hidden input that
+    // calls the card-local updateLbPreview — reuse that path (deferred so
+    // it's safe even when called before the bench tab finishes wiring up).
+    setTimeout(() => {
+      try { hidden.dispatchEvent(new Event("change")); } catch (e) {}
+    }, 0);
+  }
+  // highlight the chosen row (if it is in the rendered slice)
+  const list = document.getElementById("lb-lora-list");
+  if (list) {
+    list.querySelectorAll(".row[data-key]").forEach(r => {
+      r.classList.toggle("sel", r.dataset.key === key);
+    });
+  }
+}
+function renderLbLoraList() {
+  const list = document.getElementById("lb-lora-list");
+  if (!list) return;
+  const slice = lbLora.loras.slice(0, lbLora.rendered);
+  list.innerHTML = slice.map(m => `<label class="row" style="cursor:pointer;padding:4px 8px;border-radius:4px" data-key="${esc(m.key)}">
+    <span class="grow" style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.display_name || m.name)}</span>
+    <span class="faint small" style="white-space:nowrap">${esc(m.folder || "/")}</span>
+  </label>`).join("") || `<div class="empty">No LoRAs match.</div>`;
+  // apply the selection highlight
+  list.querySelectorAll(".row[data-key]").forEach(r => {
+    r.classList.toggle("sel", r.dataset.key === lbLora.selected);
+  });
+  const cnt = document.getElementById("lb-lora-cnt");
+  if (cnt) cnt.textContent = `${lbLora.total} LoRA(s)`;
+  const more = document.getElementById("lb-lora-more");
+  if (more) {
+    if (lbLora.rendered < lbLora.total) {
+      more.innerHTML = `<span class="grow"></span><button class="btn small" id="lb-lora-more-btn">Load ${lbLora.total - lbLora.rendered} more…</button><span class="grow"></span>`;
+      document.getElementById("lb-lora-more-btn").onclick = async () => {
+        // append the next chunk (server-side chunking)
+        const params = new URLSearchParams();
+        if (lbLora.root) params.set("root", lbLora.root);
+        if (lbLora.folder) params.set("folder", lbLora.folder);
+        if (lbLora.q) params.set("q", lbLora.q);
+        params.set("sort", lbLora.sort || "name");
+        params.set("limit", String(LORA_CHUNK));
+        params.set("offset", String(lbLora.rendered));
+        try {
+          const d = await API.get("/loras?" + params.toString());
+          lbLora.loras = lbLora.loras.concat(d.loras || []);
+          lbLora.rendered = Math.min(lbLora.total, lbLora.rendered + LORA_CHUNK);
+          renderLbLoraList();
+        } catch (e) { toast(e.message); }
+      };
+    } else {
+      more.innerHTML = "";
+    }
+  }
+  list.querySelectorAll(".row[data-key]").forEach(r => {
+    r.onclick = (e) => { e.preventDefault(); lbSetSelectedLora(r.dataset.key); };
+  });
+}
+let lbLoraQTimer = null;
+function bindLbLoraFilter() {
+  const q = document.getElementById("lb-lora-q");
+  if (!q) return;
+  q.oninput = (e) => {
+    if (lbLoraQTimer) clearTimeout(lbLoraQTimer);
+    lbLoraQTimer = setTimeout(() => {
+      lbLora.q = e.target.value.trim();
+      lbLora.rendered = LORA_CHUNK;
+      loadLbLoras();
+    }, 300);
+  };
+}
+// Pre-select a pending lora (from "Bench LoRA" on the LoRAs page):
+// find its folder, select the matching tree node, load that folder, and
+// mark the row selected. Silently ignored on 404 (current behavior).
+async function lbApplyPendingLora(pendingLora) {
+  if (!pendingLora) return;
+  let m;
+  try { m = await API.get("/loras/" + encodeURIComponent(pendingLora)); }
+  catch (e) { return; }
+  const el = document.getElementById("lb-ltree");
+  if (!el) return;
+  lbLora.root = m.root || "";
+  lbLora.folder = m.folder || "";
+  // select the deepest matching tree node
+  const node = el.querySelector(
+    `.node[data-root="${CSS.escape(m.root || "")}"][data-folder="${CSS.escape(m.folder || "")}"]`)
+    || el.querySelector(`.node[data-root="${CSS.escape(m.root || "")}"]`)
+    || el.querySelector(".node.root");
+  if (node) lbSelectTreeNode(el, node);
+  // re-load that folder (folder scope) then mark the row selected
+  lbLora.q = "";
+  const qEl = document.getElementById("lb-lora-q");
+  if (qEl) qEl.value = "";
+  await loadLbLoras();
+  lbSetSelectedLora(pendingLora);
+}
+async function loadLoras() {
+  const params = new URLSearchParams();
+  if (loraState.root) params.set("root", loraState.root);
+  if (loraState.folder) params.set("folder", loraState.folder);
+  if (loraState.q) params.set("q", loraState.q);
+  params.set("sort", loraState.sort);
+  const d = await API.get("/loras?" + params.toString());
+  loraState.loras = d.loras;
+  loraState.rendered = 0;
+  renderLoraGrid();
+}
+function renderLoraGrid() {
+  const el = document.getElementById("l-grid");
+  const all = loraState.loras;
+  document.getElementById("l-count").textContent = `${all.length} LoRA(s)`;
+  // Performance: only render the first CHUNK of cards; "Load more" appends.
+  if (loraState.rendered === 0) loraState.rendered = Math.min(LORA_CHUNK, all.length);
+  const slice = all.slice(0, loraState.rendered);
+  el.innerHTML = slice.map(m => {
+    const sel = selLoras.has(m.key) ? "sel" : "";
+    let thumb;
+    if (m.preview) {
+      if (m.preview_kind === "video") {
+        thumb = `<video class="thumb" muted playsinline preload="metadata"
+          src="${fileUrl(m.preview)}"
+          onerror="this.outerHTML='<div class=&quot;thumb placeholder&quot;>no preview</div>'"></video>`;
+      } else {
+        thumb = `<img class="thumb" loading="lazy" src="${fileUrl(m.preview)}" onerror="this.outerHTML='<div class=&quot;thumb placeholder&quot;>no image</div>'">`;
+      }
+    } else {
+      thumb = `<div class="thumb placeholder">no preview</div>`;
+    }
+    return `<div class="mcard ${sel}" data-key="${esc(m.key)}">
+      <div class="cb">${sel ? "✓" : ""}</div>
+      ${thumb}
+      <div class="body">
+        <div class="name">${esc(m.display_name || m.name)}</div>
+        <div class="meta"><span class="stars">${stars(m.stars)}</span><span>${fmtBytes(m.size)}</span></div>
+        <div class="meta"><span class="faint">${esc(m.folder||"/")}</span></div>
+      </div>
+    </div>`;
+  }).join("") || `<div class="empty" style="grid-column:1/-1">No LoRAs in this folder.</div>`;
+  // "Load more" row (hidden when everything is rendered)
+  const moreRow = document.getElementById("l-more-row");
+  if (loraState.rendered < all.length) {
+    moreRow.innerHTML = `<span class="grow"></span><button class="btn" id="l-more">Load ${all.length - loraState.rendered} more…</button><span class="grow"></span>`;
+    document.getElementById("l-more").onclick = () => {
+      loraState.rendered = Math.min(LORA_CHUNK, all.length);
+      renderLoraGrid();
+    };
+  } else {
+    moreRow.innerHTML = "";
+  }
+  el.querySelectorAll(".mcard").forEach(c => c.onclick = (e) => {
+    if (e.target.classList.contains("cb") || e.target.closest(".cb")) toggleLoraSel(c.dataset.key);
+    else openLoraDetail(c.dataset.key);
+  });
+  updateLoraSelbar();
+}
+function toggleLoraSel(key) {
+  if (selLoras.has(key)) selLoras.delete(key); else selLoras.add(key);
+  const card = document.querySelector(`#l-grid .mcard[data-key="${CSS.escape(key)}"]`);
+  if (card) {
+    card.classList.toggle("sel", selLoras.has(key));
+    const cb = card.querySelector(".cb");
+    if (cb) cb.textContent = selLoras.has(key) ? "✓" : "";
+  }
+  updateLoraSelbar();
+}
+function updateLoraSelbar() {
+  const bar = document.getElementById("l-selbar");
+  if (!bar) return;
+  bar.classList.remove("hidden");
+  const hasSel = selLoras.size > 0;
+  bar.innerHTML = `<span class="grow"><b>${selLoras.size}</b> selected</span>
+    ${hasSel ? `<button class="btn primary small" id="l-sel-bench">▶ Bench</button>` : ""}
+    <button class="btn small" id="l-sel-all">Select all</button>
+    ${hasSel ? `<button class="btn small" id="l-sel-none">Clear</button>` : ""}`;
+  document.getElementById("l-sel-all").onclick = () => {
+    loraState.loras.forEach(m => selLoras.add(m.key));
+    loraState.rendered = Math.min(LORA_CHUNK, loraState.loras.length);
+    renderLoraGrid();
+  };
+  if (hasSel) {
+    document.getElementById("l-sel-none").onclick = () => { selLoras.clear(); renderLoraGrid(); };
+    // LoRA bench takes a single LoRA — bench the first selected one.
+    document.getElementById("l-sel-bench").onclick = () => {
+      const first = [...selLoras][0];
+      if (selLoras.size > 1) toast(`Benching the first of ${selLoras.size} selected LoRAs`);
+      localStorage.setItem("cb_pending_lora", first);
+      location.hash = "#/bench?tab=lora";
+    };
+  }
+}
+
+async function openLoraDetail(key) {
+  const m = await API.get("/loras/" + encodeURIComponent(key));
+  const box = modal(`
+    <div class="mh"><h2 style="margin:0">${esc(m.display_name || m.name)}</h2>
+      <button class="btn small" data-close>Close ✕</button></div>
+    <div class="mb2 model-detail">
+      ${m.preview
+        ? (m.preview_kind === "video"
+            ? `<video src="${fileUrl(m.preview)}" controls muted loop playsinline></video>`
+            : `<img src="${fileUrl(m.preview)}">`)
+        : `<div class="thumb placeholder" style="aspect-ratio:1/1">no preview</div>`}
+      <div>
+        <div class="tabs">
+          <button class="active" data-tab="info">Info</button>
+          <button data-tab="outputs">Outputs (${(m.recent_outputs||[]).length})</button>
+        </div>
+        <div id="l-tab-info">
+          <div class="kv">
+            <span class="k">Name</span><span class="v">${esc(m.name)}</span>
+            <span class="k">Display</span><span class="v">${esc(m.display_name)}</span>
+            <span class="k">ComfyUI lora_name</span><span class="v"><code>${esc(m.rel)}</code></span>
+            <span class="k">Location</span><span class="v"><code>${esc(m.path)}</code></span>
+            <span class="k">Size</span><span class="v">${fmtBytes(m.size)}</span>
+            <span class="k">Civitai</span><span class="v">${m.civitai?.name ? esc(m.civitai.name)+" · "+(m.civitai.author||"") : "—"}</span>
+            <span class="k">Stars</span><span class="v"><span class="stars" id="ld-stars">${stars(m.stars)}</span></span>
+          </div>
+          <label class="field mt"><span class="lab">Notes</span>
+            <textarea id="ld-notes" rows="3">${esc(m.notes||"")}</textarea></label>
+          <div class="row wrap">
+            <div class="row" id="ld-star-btns"></div>
+            <span class="grow"></span>
+            <button class="btn" id="ld-save">Save</button>
+            <button class="btn primary" id="ld-bench">▶ Bench LoRA</button>
+          </div>
+        </div>
+        <div id="l-tab-outputs" class="hidden"></div>
+      </div>
+    </div>`);
+  const sb = document.getElementById("ld-star-btns");
+  // On close, push the (possibly) updated stars back into the live grid.
+  let saved = false;
+  const origNotes = document.getElementById("ld-notes").value;
+  box.__onclose = () => {
+    if (route.name !== "loras" || !document.getElementById("l-grid")) return;
+    const hit = loraState.loras.find(x => x.key === key);
+    if (!hit) return;
+    if (saved) {
+      let s = 0; sb.querySelectorAll("button").forEach((b,i) => { if (b.textContent === "★") s = i+1; });
+      hit.stars = s;
+      hit.notes = document.getElementById("ld-notes").value;
+    } else {
+      hit.notes = origNotes;
+    }
+    renderLoraGrid();
+  };
+  sb.innerHTML = [0,1,2,3,4].map(i =>
+    `<button class="iconbtn" data-star="${i+1}" style="width:28px;height:28px">${i < (m.stars||0) ? "★" : "☆"}</button>`).join("");
+  sb.querySelectorAll("button").forEach(b => b.onclick = () => {
+    const v = +b.dataset.star;
+    sb.querySelectorAll("button").forEach((x,i) => x.textContent = (i < v) ? "★" : "☆");
+  });
+  box.querySelectorAll("[data-tab]").forEach(t => t.onclick = () => {
+    box.querySelectorAll("[data-tab]").forEach(x => x.classList.remove("active"));
+    t.classList.add("active");
+    document.getElementById("l-tab-info").classList.toggle("hidden", t.dataset.tab !== "info");
+    const o = document.getElementById("l-tab-outputs");
+    o.classList.toggle("hidden", t.dataset.tab !== "outputs");
+    if (t.dataset.tab === "outputs" && !o.dataset.loaded) { renderModelOutputs(o, m); o.dataset.loaded="1"; }
+  });
+  document.getElementById("ld-save").onclick = async () => {
+    const notes = document.getElementById("ld-notes").value;
+    let s = 0; sb.querySelectorAll("button").forEach((b,i) => { if (b.textContent === "★") s = i+1; });
+    try {
+      await API.patch("/loras/" + encodeURIComponent(key), { notes, stars: s });
+      saved = true;
+      toast("Saved");
+      document.getElementById("ld-stars").textContent = stars(s);
+    } catch (e) { toast(e.message); }
+  };
+  document.getElementById("ld-bench").onclick = () => {
+    localStorage.setItem("cb_pending_lora", key);
+    location.hash = "#/bench?tab=lora";
+  };
+}
+
+// ===========================================================================
 // COMPARE (slider for 2, grid for 3+)
 // ===========================================================================
 function openCompare(items) {
@@ -763,11 +1170,16 @@ function openSingle(o, list = [o], index = 0) {
 // ===========================================================================
 async function renderWorkflows() {
   const view = document.getElementById("view");
+  const kind = (route.query && route.query.kind) || "model";
   const d = await API.get("/workflows");
+  // Scope the list to the active tab (default 'model' = today's behavior;
+  // pre-kind rows lack .kind and are treated as 'model').
+  const wfs = d.workflows.filter(w => (w.kind || "model") === kind);
   view.innerHTML = `
+    ${kindTabsHTML(kind)}
     <div class="row space wrap mb">
       <div><h1 style="margin:0">Workflows</h1>
-        <div class="muted small">Test workflows — each swaps the model + optional prompt/seed.</div></div>
+        <div class="muted small">${kind === "lora" ? "LoRA workflows — each must contain a LoraLoader node." : "Test workflows — each swaps the model + optional prompt/seed."}</div></div>
       <div class="row">
         <label class="btn small" style="cursor:pointer">⬆ Upload .json
           <input type="file" id="wf-upload" accept=".json,application/json" class="hidden">
@@ -775,16 +1187,28 @@ async function renderWorkflows() {
         <button class="btn primary" id="wf-add">+ Add (paste JSON)</button>
       </div>
     </div>
-    <div id="wf-list">${d.workflows.map(wfRow).join("") || `<div class="empty">No workflows. Upload or add one.</div>`}</div>
+    ${kind === "lora" ? `<div class="card mb" style="border-left:3px solid var(--acc)">
+      <div class="small"><b>How to build a LoRA-bench workflow</b></div>
+      <ol class="muted small" style="margin:6px 0 0 18px;padding:0;line-height:1.55">
+        <li>Build it in ComfyUI with a <code>Load LoRA (Model and CLIP)</code> node (<code>LoraLoader</code>) — this is the node the strength-sweep bench edits.</li>
+        <li>Keep any <code>Lora Loader (LoraManager)</code> LoRAs you want <b>fixed</b> on a LoraManager node — the bench leaves those untouched and only changes the designated node.</li>
+        <li>Export the workflow as <b>API-format</b> JSON (Workflow → Save (API), or the <code>prompt</code> object) and upload it here.</li>
+        <li>On upload the app asks <b>which node the bench should target</b> — confirm the <code>LoraLoader</code> node (it's pre-selected). You can re-designate any time with the <b>🎯 Bench node</b> button on the row.</li>
+        <li>Run it from <b>Run Bench → Lora Bench</b>: pick this workflow + a LoRA + the strength range — one image per strength step.</li>
+      </ol></div>` : ``}
+    <div id="wf-list">${wfs.map(wfRow).join("") || (kind === "lora"
+      ? `<div class="empty">No LoRA workflows yet — upload one (a workflow containing a LoraLoader node)</div>`
+      : `<div class="empty">No workflows. Upload or add one.</div>`)}</div>
     <div id="wf-editor" class="card mt hidden"></div>
     <div class="card mt hidden" id="wf-addcard"><h3>Add a workflow</h3>
-      <p class="muted small">Paste a ComfyUI <b>API-format</b> prompt (JSON, the <code>prompt</code> object from a workflow — not the UI graph). It must contain a <code>CheckpointLoaderSimple</code> or <code>UNETLoaderWithName</code> node.</p>
+      <p class="muted small">Paste a ComfyUI <b>API-format</b> prompt (JSON, the <code>prompt</code> object from a workflow — not the UI graph). It must contain a <code>CheckpointLoaderSimple</code> or <code>UNETLoaderWithName</code> node (or a <code>LoraLoader</code> node for LoRA workflows).</p>
       <label class="field"><span class="lab">Name</span><input id="wf-name" placeholder="e.g. Text to Image (Anima)"></label>
       <label class="field"><span class="lab">Description</span><input id="wf-desc" placeholder="optional"></label>
       <label class="field"><span class="lab">API prompt (JSON)</span>
         <textarea id="wf-json" rows="10" placeholder='{"52":{"inputs":...,"class_type":"..."},...}'></textarea></label>
       <button class="btn primary" id="wf-submit">Add workflow</button>
     </div>`;
+  bindKindTabs(kind, (k) => { location.hash = "#/workflows?kind=" + k; });
   bindWfList();
   document.getElementById("wf-add").onclick = () => {
     const card = document.getElementById("wf-addcard");
@@ -794,13 +1218,36 @@ async function renderWorkflows() {
   document.getElementById("wf-upload").onchange = async (e) => {
     const f = e.target.files[0];
     if (!f) return;
+    // OPTIONAL lora-node designation (asked at upload time): parse the
+    // file client-side, and if it contains LoRA loader nodes let the user
+    // pick which one the bench targets. Untouched -> backend auto-detects
+    // (standard LoraLoader preferred) — same as before.
+    let benchNodeId = null;
+    let wfKind = null; // null = auto (backend derives from nodes)
+    const nodes = loraNodesFromText(await fileTextSafe(f));
+    if (nodes.length) {
+      // INTENT first: model workflow vs LoRA-bench workflow. Only the
+      // LoRA-bench path asks which node to target.
+      const intent = await askWorkflowIntent(f.name);
+      if (intent === false) { toast("Cancelled"); e.target.value = ""; return; }
+      wfKind = intent;
+      if (intent === "lora") {
+        benchNodeId = await askLoraBenchNode(nodes, f.name);
+        // false = user cancelled the node step → still proceed, let backend
+        // auto-detect (do not abort the upload).
+      }
+    }
     const fd = new FormData();
     fd.append("file", f);
     fd.append("name", f.name.replace(/\.(json)$/i, ""));
+    if (wfKind) fd.append("kind", wfKind);
+    if (benchNodeId) fd.append("bench_node_id", benchNodeId);
     toast("Uploading & converting…");
     try {
       const r = await API.upload("/workflows/upload", fd);
-      toast(`Workflow added: ${r.workflow.name}`);
+      toast(`Workflow added: ${r.workflow.name}` +
+            (r.workflow.lora_bench_supported ? "" :
+              (r.workflow.kind === "lora" ? " (LoRA node is LoraManager — not strength-sweepable)" : "")));
       renderWorkflows();
     } catch (err) { toast(err.message); }
     e.target.value = "";
@@ -811,9 +1258,164 @@ async function renderWorkflows() {
     const raw = document.getElementById("wf-json").value.trim();
     if (!name || !raw) { toast("Name and JSON required"); return; }
     let prompt; try { prompt = JSON.parse(raw); } catch { toast("Invalid JSON"); return; }
+    // OPTIONAL lora-node designation (asked at add time) — same picker as
+    // upload; the user can skip it and the backend auto-detects.
+    let benchNodeId = null;
+    let wfKind = null; // null = auto (backend derives from nodes)
+    const nodes = loraNodesFromPrompt(prompt);
+    if (nodes.length) {
+      // INTENT first: model workflow vs LoRA-bench workflow. Only the
+      // LoRA-bench path asks which node to target.
+      const intent = await askWorkflowIntent(name);
+      if (intent === false) { toast("Cancelled"); return; }
+      wfKind = intent;
+      if (intent === "lora") {
+        benchNodeId = await askLoraBenchNode(nodes, name);
+        if (benchNodeId === false) benchNodeId = null; // skipped → auto-detect
+      }
+    }
     try {
-      await API.post("/workflows", { name, description: desc, prompt });
+      await API.post("/workflows", { name, description: desc, prompt,
+        kind: wfKind || undefined,
+        bench_node_id: benchNodeId || undefined });
       toast("Workflow added"); renderWorkflows();
+    } catch (e) { toast(e.message); }
+  };
+}
+// ---- LoRA bench-node picker (upload/add time) ---------------------------
+const LORA_LOADER_TYPES = ["LoraLoader", "LoraLoaderModelOnly", "Lora Loader (LoraManager)"];
+const SWEEPABLE_TYPES = ["LoraLoader", "LoraLoaderModelOnly"];
+function loraNodesFromPrompt(prompt) {
+  // API prompt: {id: {class_type, inputs}}
+  if (!prompt || typeof prompt !== "object" || !Array.isArray(prompt.nodes)) {
+    const out = [];
+    for (const [nid, n] of Object.entries(prompt || {})) {
+      if (n && LORA_LOADER_TYPES.includes(n.class_type)) out.push({ id: nid, class_type: n.class_type });
+    }
+    return out;
+  }
+  return [];
+}
+function loraNodesFromText(raw) {
+  if (!raw) return [];
+  let d; try { d = JSON.parse(raw); } catch { return []; }
+  // UI graph: nodes[] with a `type` field
+  if (Array.isArray(d.nodes)) {
+    return d.nodes
+      .filter(n => n && LORA_LOADER_TYPES.includes(n.type))
+      .map(n => { try { return { id: String(n.id), class_type: n.type }; } catch { return null; } })
+      .filter(Boolean);
+  }
+  return loraNodesFromPrompt(d);
+}
+async function fileTextSafe(f) {
+  try { return f.size > 4 * 1024 * 1024 ? "" : await f.text(); } catch { return ""; }
+}
+// Modal asking the user's INTENT for a workflow that contains LoRA nodes:
+// is it a MODEL workflow (kept as-is, appears in the Model tab, LoRA nodes
+// present but not bench-targeted) or a LoRA-BENCH workflow (target a node
+// for the strength-sweep)? Returns "model" | "lora" | false (cancelled).
+function askWorkflowIntent(wfName) {
+  const box = modal(`
+    <div class="mh"><h2 style="margin:0">How will you use this workflow?</h2>
+      <button class="btn small" data-close>Cancel ✕</button></div>
+    <div class="mb2">
+      <p class="muted small">"${esc(wfName)}" contains LoRA loader node(s).
+        Pick how the app should treat it — this sets which tab it appears in
+        and whether it can run the LoRA strength-sweep bench.
+        A workflow can keep its LoRA nodes and still be a model workflow.</p>
+      <div class="row" style="gap:10px;margin-top:14px">
+        <button class="btn" id="wfi-model" style="flex:1;padding:12px 10px">
+          📦 Model workflow<br>
+          <span class="muted small">Runs the model bench. LoRA nodes are kept
+          but not bench-targeted.</span>
+        </button>
+        <button class="btn primary" id="wfi-lora" style="flex:1;padding:12px 10px">
+          🔁 LoRA-bench workflow<br>
+          <span class="muted small">Target a LoRA node for the
+          strength-sweep bench (asks which node next).</span>
+        </button>
+      </div>
+    </div>`);
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = (v) => {
+      if (settled) return; settled = true;
+      box.__onclose = null; closeModal(); resolve(v);
+    };
+    box.__onclose = () => finish(false); // ✕ / backdrop
+    box.querySelector("#wfi-model").onclick = () => finish("model");
+    box.querySelector("#wfi-lora").onclick = () => finish("lora");
+  });
+}
+// Modal asking "which node should the LoRA bench target?".
+// Returns the chosen node id, null (user skipped), or false (cancelled).
+function askLoraBenchNode(nodes, wfName) {
+  const pre = nodes.find(n => SWEEPABLE_TYPES.includes(n.class_type));
+  const box = modal(`
+    <div class="mh"><h2 style="margin:0">LoRA bench node</h2>
+      <button class="btn small" data-close>Cancel ✕</button></div>
+    <div class="mb2">
+      <p class="muted small">"${esc(wfName)}" contains ${nodes.length} LoRA loader node(s).
+        The strength-sweep bench edits <code>lora_name</code> + <code>strength_*</code> on ONE node.
+        Pick which one to target — or skip to let the app auto-detect
+        (prefers a standard LoraLoader).</p>
+      <label class="field"><span class="lab">Target node</span>
+        <select id="lbn-sel">
+          ${nodes.map(n => `<option value="${esc(n.id)}" ${pre && pre.id === n.id ? "selected" : ""}>node ${esc(n.id)} · ${esc(n.class_type)}${SWEEPABLE_TYPES.includes(n.class_type) ? "" : " (NOT sweepable)"}</option>`).join("")}
+        </select></label>
+      <label class="row" style="cursor:pointer"><input type="checkbox" id="lbn-use" checked style="width:auto">
+        <span class="small">Designate this node for the LoRA bench</span></label>
+      <div class="row mt">
+        <span class="grow"></span>
+        <button class="btn" id="lbn-skip">Skip (auto-detect)</button>
+        <button class="btn primary" id="lbn-ok">Confirm</button>
+      </div>
+    </div>`);
+  return new Promise(resolve => {
+    const sel = box.querySelector("#lbn-sel");
+    const use = box.querySelector("#lbn-use");
+    let settled = false;
+    const finish = (val) => {
+      if (settled) return;
+      settled = true;
+      box.__onclose = null; // don't let closeModal re-resolve with `false`
+      closeModal();
+      resolve(val);
+    };
+    box.__onclose = () => finish(false); // cancelled via ✕ / backdrop
+    box.querySelector("#lbn-ok").onclick = () => finish(use.checked ? sel.value : null);
+    box.querySelector("#lbn-skip").onclick = () => finish(null);
+  });
+}
+// Re-designate the bench node on an EXISTING workflow (per-row button).
+async function redesignateLoraBenchNode(w) {
+  // The list rows don't carry the full prompt — fetch the workflow first.
+  let full = w;
+  try { full = await API.get("/workflows/" + w.id); } catch { /* keep row data */ }
+  const nodes = loraNodesFromPrompt(full.prompt || {});
+  if (!nodes.length) { toast("No LoRA loader nodes in this workflow"); return; }
+  const cur = full.lora_node_id || (nodes.find(n => SWEEPABLE_TYPES.includes(n.class_type)) || {}).id;
+  const box = modal(`
+    <div class="mh"><h2 style="margin:0">LoRA bench node — ${esc(full.name || w.name || "")}</h2>
+      <button class="btn small" data-close>Close ✕</button></div>
+    <div class="mb2">
+      <p class="muted small">Currently targeting <b>${esc(full.lora_node_id || "(none — auto-detect)")}</b>
+        ${full.lora_bench_supported ? "(strength-sweepable)" : "(NOT strength-sweepable)"}.
+        ${nodes.length} LoRA loader node(s) available.</p>
+      <label class="field"><span class="lab">Target node</span>
+        <select id="lbn-sel">
+          ${nodes.map(n => `<option value="${esc(n.id)}" ${String(cur) === String(n.id) ? "selected" : ""}>node ${esc(n.id)} · ${esc(n.class_type)}${SWEEPABLE_TYPES.includes(n.class_type) ? "" : " (NOT sweepable)"}</option>`).join("")}
+        </select></label>
+      <div class="row mt"><span class="grow"></span>
+        <button class="btn primary" id="lbn-save">Save designation</button></div>
+    </div>`);
+  box.querySelector("#lbn-save").onclick = async () => {
+    const nid = box.querySelector("#lbn-sel").value;
+    try {
+      await API.put("/workflows/" + w.id, { lora_node_id: nid });
+      toast(`LoRA bench node for "${w.name}" → ${nid}`);
+      closeModal(); renderWorkflows();
     } catch (e) { toast(e.message); }
   };
 }
@@ -834,6 +1436,7 @@ function wfRow(w) {
       </div>
       <div class="row wrap">
         <button class="btn small primary" data-wf-edit="${esc(w.id)}">✎ Edit nodes</button>
+        ${w.kind === "lora" ? `<button class="btn small" data-wf-benchnode="${esc(w.id)}" title="Choose which LoRA loader node the bench targets">🎯 Bench node${w.lora_node_id ? " (" + esc(w.lora_node_id) + ")" : ""}</button>` : ""}
         <button class="btn small" data-wf-use="${esc(w.id)}">Use</button>
         <button class="btn small" data-wf-rename="${esc(w.id)}">Rename</button>
         <button class="btn small danger" data-wf-del="${esc(w.id)}">Delete</button>
@@ -847,6 +1450,11 @@ function bindWfList() {
     location.hash = "#/bench";
   });
   document.querySelectorAll("[data-wf-edit]").forEach(b => b.onclick = () => openNodeEditor(b.dataset.wfEdit));
+  document.querySelectorAll("[data-wf-benchnode]").forEach(b => b.onclick = () => {
+    // Row data is enough for the button; redesignateLoraBenchNode fetches
+    // the full workflow (incl. prompt) by id before building the picker.
+    redesignateLoraBenchNode({ id: b.dataset.wfBenchnode });
+  });
   document.querySelectorAll("[data-wf-rename]").forEach(b => b.onclick = async () => {
     const name = prompt("New workflow name:");
     if (name) { try { await API.put("/workflows/"+b.dataset.wfRename,{name}); renderWorkflows(); } catch(e){toast(e.message);} }
@@ -938,16 +1546,24 @@ async function openNodeEditor(wid) {
 // ===========================================================================
 async function renderBench() {
   const view = document.getElementById("view");
-  const [wfs, models] = await Promise.all([
+  const tab = (route.query && route.query.tab) || "model";
+  const [wfs, models, cfg] = await Promise.all([
     API.get("/workflows"), API.get("/models?sort=name"),
+    API.get("/config").catch(() => ({})),
   ]);
   const pendingModels = JSON.parse(localStorage.getItem("cb_pending_models") || "[]");
   const pendingWf = localStorage.getItem("cb_pending_wf");
-  localStorage.removeItem("cb_pending_models"); localStorage.removeItem("cb_pending_wf");
+  const pendingLora = localStorage.getItem("cb_pending_lora");
+  localStorage.removeItem("cb_pending_models"); localStorage.removeItem("cb_pending_wf"); localStorage.removeItem("cb_pending_lora");
   const wfSel = pendingWf || (wfs.workflows[0] && wfs.workflows[0].id) || "";
 
   view.innerHTML = `
     <h1 style="margin:0 0 4px">Run bench</h1>
+    <div class="tabs" id="bench-tabs">
+      <button data-btab="model" class="${tab === "model" ? "active" : ""}">Model Bench</button>
+      <button data-btab="lora" class="${tab === "lora" ? "active" : ""}">Lora Bench</button>
+    </div>
+    <div id="bench-model-tab" class="${tab === "model" ? "" : "hidden"}">
     <div class="muted small mb">Pick a workflow, the models to run, and optional prompt/seed overrides.</div>
     <div class="grid2">
       <div class="card">
@@ -978,6 +1594,53 @@ async function renderBench() {
         </div>
         <div style="max-height:56vh;overflow:auto;border:1px solid var(--border);border-radius:var(--radius-s)" id="r-list"></div>
       </div>
+    </div>
+    </div>
+    <div id="bench-lora-tab" class="${tab === "lora" ? "" : "hidden"}">
+    <div class="muted small mb">Sweep one LoRA across strength values on a single base model — same seed for every step.</div>
+    <div style="max-width:920px">
+      <div class="card">
+        <label class="field"><span class="lab">LoRA workflow</span>
+          <select id="lb-wf"></select>
+          <div id="lb-wf-hint" class="mt small muted"></div></label>
+        <label class="field"><span class="lab">Base model</span>
+          <select id="lb-base"></select></label>
+        <div class="field"><span class="lab">LoRA <span class="faint">(pick a folder, then a LoRA)</span></span>
+          <div class="grid2" style="gap:12px">
+            <div class="tree" id="lb-ltree" style="max-height:38vh;overflow:auto;border:1px solid var(--border);border-radius:6px"><span class="spin2"></span>&nbsp; loading…</div>
+            <div>
+              <div class="row" style="margin-bottom:6px;gap:8px"><input class="search" id="lb-lora-q" placeholder="filter…" style="max-width:180px">
+              <select id="lb-lora-sort" style="width:auto">
+                <option value="name">Sort: name</option>
+                <option value="display">Sort: display name</option>
+                <option value="stars">Sort: stars</option>
+                <option value="date">Sort: newest</option>
+                <option value="size">Sort: size</option>
+              </select></div>
+              <div style="max-height:38vh;overflow:auto;border:1px solid var(--border);border-radius:6px" id="lb-lora-list"></div>
+              <span class="muted small" id="lb-lora-cnt"></span>
+              <div class="row mt" id="lb-lora-more"></div>
+            </div>
+          </div>
+          <input type="hidden" id="lb-lora"></div>
+        <div class="grid2" style="gap:12px">
+          <label class="field"><span class="lab">Strength min</span>
+            <input id="lb-min" type="number" step="0.01" min="-100" max="100" value="0.0"></label>
+          <label class="field"><span class="lab">Strength max</span>
+            <input id="lb-max" type="number" step="0.01" value="1.0"></label>
+        </div>
+        <div class="grid2" style="gap:12px">
+          <label class="field"><span class="lab">Increment <span class="faint">(&gt; 0)</span></span>
+            <input id="lb-inc" type="number" step="0.01" value="0.1"></label>
+          <label class="field"><span class="lab">Seed <span class="faint">(same for every step)</span></span>
+            <input id="lb-seed" type="number" value="${auth.default_seed||42}"></label>
+        </div>
+        <label class="field"><span class="lab">Prompt override <span class="faint">(optional)</span></span>
+          <textarea id="lb-prompt" rows="3" placeholder="leave blank to use the workflow's default prompt"></textarea></label>
+        <div id="lb-preview" class="token-box mb"></div>
+        <button class="btn primary" id="lb-start" style="width:100%">▶ Start LoRA sweep</button>
+      </div>
+    </div>
     </div>`;
 
   // ---- prompt-target node picker ----
@@ -1074,51 +1737,166 @@ async function renderBench() {
       refreshIndicator();
     } catch (e) { toast(e.message); }
   };
+
+  // ---- bench tab switching (hash-driven; both cards stay in the DOM so an
+  //      in-progress form is never lost when switching tabs) ----
+  document.querySelectorAll("#bench-tabs button").forEach(b => {
+    b.onclick = () => { const k = b.dataset.btab; if (k !== tab) location.hash = "#/bench?tab=" + k; };
+  });
+
+  // ---- Lora bench (strength sweep) ----
+  // Only standard-LoraLoader workflows can be strength-swept; LoraManager
+  // workflows (loras baked in) are excluded via lora_bench_supported.
+  const loraWfs = wfs.workflows.filter(
+    w => (w.kind || "model") === "lora" && w.lora_bench_supported);
+  const lbWf = document.getElementById("lb-wf");
+  lbWf.innerHTML = loraWfs.map(w => `<option value="${esc(w.id)}">${esc(w.name)}</option>`).join("");
+  if (!loraWfs.length) {
+    document.getElementById("lb-wf-hint").innerHTML =
+      `No standard-LoraLoader workflow — the lora strength bench needs a workflow with a single <code>LoraLoader</code> node. See the <a href="#/workflows?kind=lora">Workflows</a> page (LoRAs tab) for LoRA-tagged workflows.`;
+  }
+  const lbBase = document.getElementById("lb-base");
+  lbBase.innerHTML = models.models.map(m =>
+    `<option value="${esc(m.key)}">${esc(m.display_name || m.name)}</option>`).join("");
+  // Pre-select the configured default base model (Set → Setup page), if it
+  // exists among the options. One-shot at tab build — user can still change.
+  const loraBaseDefault = (cfg && cfg.lora_bench_default_model) || "";
+  if (loraBaseDefault && [...lbBase.options].some(o => o.value === loraBaseDefault)) {
+    lbBase.value = loraBaseDefault;
+  }
+  // LoRA picker: folder tree (left) + server-filtered chunked list (right).
+  // The hidden #lb-lora input holds the selected key so updateLbPreview /
+  // the lb-start submit body keep reading it unchanged. (Named lbLoraInput
+  // to avoid shadowing the module-level lbLora *state* object.)
+  const lbLoraInput = document.getElementById("lb-lora");
+  loadLbLoraTree().then(() => lbApplyPendingLora(pendingLora));
+  bindLbLoraFilter();
+  const lbSort = document.getElementById("lb-lora-sort");
+  if (lbSort) {
+    lbSort.value = lbLora.sort || "name";
+    lbSort.onchange = (e) => { lbLora.sort = e.target.value; loadLbLoras(); };
+  }
+
+  // Step preview — SAME clamp rule as the backend: steps = min, min+inc, …
+  // up to max, final step clamped to max (so the last value == max);
+  // min==max -> just [min]. One image per strength step.
+  const fmtStep = (v) => String(parseFloat(v.toFixed(4)));
+  const computeSteps = (min, max, inc) => {
+    const steps = [];
+    if (min === max) return [min];
+    for (let i = 0; ; i++) {
+      const v = min + i * inc;
+      if (v >= max - inc * 1e-6) break;
+      steps.push(v);
+    }
+    steps.push(max);
+    return steps;
+  };
+  const updateLbPreview = () => {
+    const min = parseFloat(document.getElementById("lb-min").value);
+    const max = parseFloat(document.getElementById("lb-max").value);
+    const inc = parseFloat(document.getElementById("lb-inc").value);
+    const pv = document.getElementById("lb-preview");
+    const start = document.getElementById("lb-start");
+    if (!isFinite(min) || !isFinite(max) || !isFinite(inc) || inc <= 0 || min > max) {
+      pv.textContent = "⚠ Invalid range: need min ≤ max and increment > 0.";
+      pv.style.color = "var(--err)";
+      start.disabled = true;
+      return null;
+    }
+    const steps = computeSteps(min, max, inc);
+    pv.style.color = "";
+    start.disabled = !lbWf.value || !lbBase.value || !lbLoraInput.value;
+    pv.textContent = `${steps.length} steps → ${steps.length} images: ${steps.map(fmtStep).join(", ")}`;
+    return steps;
+  };
+  ["lb-min", "lb-max", "lb-inc"].forEach(id => document.getElementById(id).addEventListener("input", updateLbPreview));
+  [lbWf, lbBase, lbLoraInput].forEach(sel => sel.addEventListener("change", updateLbPreview));
+  updateLbPreview();
+
+  document.getElementById("lb-start").onclick = async () => {
+    const min = parseFloat(document.getElementById("lb-min").value);
+    const max = parseFloat(document.getElementById("lb-max").value);
+    const inc = parseFloat(document.getElementById("lb-inc").value);
+    if (inc <= 0 || min > max) { toast("Need min ≤ max and increment > 0"); return; }
+    if (!lbWf.value) { toast("No LoRA workflow available — upload one first"); return; }
+    const body = {
+      workflow_id: lbWf.value,
+      base_model_key: lbBase.value,
+      lora_key: lbLoraInput.value,
+      strength_min: min,
+      strength_max: max,
+      increment: inc,
+      seed: parseInt(document.getElementById("lb-seed").value),
+      prompt: document.getElementById("lb-prompt").value.trim() || null,
+    };
+    try {
+      const r = await API.post("/benches/run-lora", body);
+      toast(r.queued
+        ? `Queued LoRA sweep (${r.bench.total} steps) — will start when the current bench finishes`
+        : `Started LoRA sweep (${r.bench.total} steps)`);
+      refreshIndicator();
+      location.hash = "#/outputs?kind=lora";
+    } catch (e) {
+      // 400/404 -> the ApiError message carries the backend `detail`
+      toast(e.message);
+    }
+  };
 }
 
 // ===========================================================================
 // PAGE: Outputs (bench-filterable)
 // ===========================================================================
 let outSel = new Map(); // id -> output
+let outState = { q: "" }; // free-text search, scoped to the active kind tab
 async function renderOutputs() {
   const view = document.getElementById("view");
+  const kind = (route.query && route.query.kind) || "model";
   const benchId = (route.query && route.query.bench) || "";
+  // Switching kind tabs must NOT carry over a search or selection from the
+  // other tab — reset the transients up-front (hash change re-renders this).
+  outState.q = ""; outSel.clear();
   const params = new URLSearchParams();
+  params.set("kind", kind);
   if (benchId) params.set("bench_id", benchId);
   const d = await API.get("/outputs?" + params.toString());
+  const rows = (d.outputs || []).filter(o => (o.kind || "model") === kind);
   view.innerHTML = `
+    ${kindTabsHTML(kind)}
     <div class="row space wrap mb">
       <div><h1 style="margin:0">Outputs</h1>
-        <div class="muted small">${d.count} image(s) · select 2 for a slider compare, 3+ for a grid</div></div>
+        <div class="muted small">${rows.length} image(s) · select 2 for a slider compare, 3+ for a grid</div></div>
       <div class="row">
         <select id="o-bench" style="width:auto">
-          <option value="">All benches</option>
+          <option value="">All ${kind === "lora" ? "LoRA" : ""} benches</option>
         </select>
+        <input class="search" id="o-q" placeholder="Search outputs…" style="max-width:200px">
         <button class="btn small" id="o-all">Select all</button>
-        <button class="btn primary" id="o-cmp">Compare selected (${outSel.size})</button>
+        <button class="btn primary" id="o-cmp">Compare selected (0)</button>
         <button class="btn small" id="o-clear">Clear</button>
       </div>
     </div>
     <div class="ogrid" id="o-grid"></div>`;
+  bindKindTabs(kind, (k) => { location.hash = "#/outputs?kind=" + k; });
   const sel = document.getElementById("o-bench");
   const list = await API.get("/benches");
-  sel.innerHTML = `<option value="">All benches</option>` +
-    list.benches.map(b => `<option value="${esc(b.id)}" ${benchId===b.id?"selected":""}>${new Date(b.created*1000).toLocaleDateString()} · ${esc(b.workflow_name)} (${b.done}/${b.total})</option>`).join("");
-  sel.onchange = () => { location.hash = sel.value ? "#/outputs?bench="+encodeURIComponent(sel.value) : "#/outputs"; };
-  document.getElementById("o-cmp").onclick = () => {
-    if (outSel.size < 2) { toast("Select at least 2"); return; }
-    openCompare([...outSel.values()]);
-  };
-  document.getElementById("o-clear").onclick = () => { outSel.clear(); renderOutputs(); };
-  document.getElementById("o-all").onclick = () => {
-    // Select exactly the currently-visible outputs (the bench-filtered results),
-    // additively — matches the Models (#sel-all) and Run-bench (#r-all) convention.
-    d.outputs.forEach(o => outSel.set(o.id, o));
-    renderOutputs(); // re-renders cells (.sel) + the #o-cmp count
+  const benches = list.benches.filter(b => (b.kind || "model") === kind);
+  sel.innerHTML = `<option value="">All ${kind === "lora" ? "LoRA" : ""} benches</option>` +
+    benches.map(b => `<option value="${esc(b.id)}" ${benchId===b.id?"selected":""}>${new Date(b.created*1000).toLocaleDateString()} · ${esc(b.workflow_name)} (${b.done}/${b.total})</option>`).join("");
+  sel.onchange = () => {
+    const q = sel.value ? "bench=" + encodeURIComponent(sel.value) : "";
+    location.hash = "#/outputs?" + [q, "kind=" + kind].filter(Boolean).join("&");
   };
   const grid = document.getElementById("o-grid");
-  grid.innerHTML = d.outputs.map(o => {
+  const qEl = document.getElementById("o-q");
+  qEl.oninput = () => { outState.q = qEl.value; drawGrid(); };
+  const cmpBtn = document.getElementById("o-cmp");
+  const cmpCount = () => { cmpBtn.textContent = `Compare selected (${outSel.size})`; };
+  const cellHTML = (o) => {
     const s = outSel.has(o.id);
+    const loraLine = (o.kind === "lora")
+      ? `<div class="lbl"><span class="badge lora">LoRA ${o.strength != null ? Number(o.strength).toFixed(2) : "—"}×</span> ${esc(o.lora_name||"")}</div>`
+      : "";
     return `<div class="ocell ${s?"sel":""}" data-oid="${esc(o.id)}">
       <div class="tick">✓</div>
       <button class="eye" type="button" title="View full size" aria-label="View full size">
@@ -1128,24 +1906,52 @@ async function renderOutputs() {
       </button>
       <img loading="lazy" src="${fileUrl(o.output)}">
       <div class="lbl">${esc(o.model_name||"")} · ${esc(o.workflow_name||"")}</div>
+      ${loraLine}
       <div class="lbl faint">${new Date(o.created*1000).toLocaleDateString()}</div>
     </div>`;
-  }).join("") || `<div class="empty" style="grid-column:1/-1">No outputs yet. Run a bench first.</div>`;
-  grid.querySelectorAll(".ocell").forEach(c => c.onclick = () => {
-    const id = c.dataset.oid;
-    if (outSel.has(id)) outSel.delete(id);
-    else outSel.set(id, d.outputs.find(o => o.id===id));
-    c.classList.toggle("sel", outSel.has(id));
-    document.getElementById("o-cmp").textContent = `Compare selected (${outSel.size})`;
-  });
-  // 👁 eye button: open that single output full-window. stopPropagation so it
-  // does NOT also toggle the cell's selection.
-  grid.querySelectorAll(".eye").forEach(b => b.onclick = (e) => {
-    e.stopPropagation();
-    const id = b.closest(".ocell").dataset.oid;
-    const index = d.outputs.findIndex(x => x.id === id);
-    if (index >= 0) openSingle(d.outputs[index], d.outputs, index);
-  });
+  };
+  const visible = () => {
+    const q = outState.q.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(o =>
+      (o.workflow_name||"").toLowerCase().includes(q) ||
+      (o.model_name||"").toLowerCase().includes(q) ||
+      (o.lora_name||"").toLowerCase().includes(q));
+  };
+  const drawGrid = () => {
+    const v = visible();
+    grid.innerHTML = v.map(cellHTML).join("") ||
+      `<div class="empty" style="grid-column:1/-1">${outState.q ? "No outputs match your search." : "No outputs yet. Run a bench first."}</div>`;
+    grid.querySelectorAll(".ocell").forEach(c => c.onclick = () => {
+      const id = c.dataset.oid;
+      if (outSel.has(id)) outSel.delete(id);
+      else outSel.set(id, rows.find(o => o.id===id));
+      c.classList.toggle("sel", outSel.has(id));
+      cmpCount();
+    });
+    // 👁 eye button: open that single output full-window (scoped to the
+    // visible, search-filtered set). stopPropagation so it does NOT also
+    // toggle the cell's selection.
+    grid.querySelectorAll(".eye").forEach(b => b.onclick = (e) => {
+      e.stopPropagation();
+      const id = b.closest(".ocell").dataset.oid;
+      const v2 = visible();
+      const index = v2.findIndex(x => x.id === id);
+      if (index >= 0) openSingle(v2[index], v2, index);
+    });
+  };
+  drawGrid();
+  cmpBtn.onclick = () => {
+    if (outSel.size < 2) { toast("Select at least 2"); return; }
+    openCompare([...outSel.values()]);
+  };
+  document.getElementById("o-clear").onclick = () => { outSel.clear(); outState.q = ""; qEl.value = ""; drawGrid(); cmpCount(); };
+  document.getElementById("o-all").onclick = () => {
+    // Select exactly the currently-visible (search-filtered) outputs,
+    // additively — matches the Models (#sel-all) and Run-bench (#r-all) convention.
+    visible().forEach(o => outSel.set(o.id, o));
+    drawGrid(); cmpCount();
+  };
 }
 
 // ===========================================================================
@@ -1169,11 +1975,17 @@ async function renderSetup() {
         <div class="mt"></div>
         <h3>Model roots <span class="faint small">(one per line)</span></h3>
         <textarea id="s-roots" rows="4">${esc((c.model_roots||[]).join("\n"))}</textarea>
+        <div class="mt"></div>
+        <h3>LoRA roots <span class="faint small">(one per line)</span></h3>
+        <textarea id="s-lora-roots" rows="4">${esc((c.lora_roots||[]).join("\n"))}</textarea>
       </div>
       <div class="card">
         <h3>App</h3>
         <label class="field"><span class="lab">Default seed</span>
           <input id="s-seed" type="number" value="${esc(c.default_seed??42)}"></label>
+        <label class="field"><span class="lab">Default base model <span class="faint">(LoRA bench)</span></span>
+          <select id="s-lora-base"></select>
+          <div class="faint small mt">Pre-selected as the base model when starting a LoRA bench.</div></label>
         <label class="row" style="margin-bottom:12px"><input type="checkbox" id="s-dark" ${c.dark_mode?"checked":""} style="width:auto">
           <span class="grow">Dark mode (default)</span></label>
         <div class="row space">
@@ -1191,6 +2003,34 @@ async function renderSetup() {
     </div>`;
   const tok = await getToken();
   document.getElementById("s-token").textContent = tok || "(hidden)";
+  // Populate the default base-model select (Setup → App) from /api/models,
+  // grouped by folder. Value = model key (absolute path).
+  (async () => {
+    const sel = document.getElementById("s-lora-base");
+    if (!sel) return;
+    sel.innerHTML = `<option value="">(no default)</option>`;
+    try {
+      const models = await API.get("/models?sort=name");
+      const byFolder = new Map();
+      (models.models || []).forEach(m => {
+        const f = m.folder || "/";
+        if (!byFolder.has(f)) byFolder.set(f, []);
+        byFolder.get(f).push(m);
+      });
+      [...byFolder.entries()].sort((a, b) => a[0].localeCompare(b[0])).forEach(([folder, ms]) => {
+        const og = document.createElement("optgroup");
+        og.label = folder;
+        ms.forEach(m => {
+          const o = document.createElement("option");
+          o.value = m.key;
+          o.textContent = m.display_name || m.name;
+          og.appendChild(o);
+        });
+        sel.appendChild(og);
+      });
+      sel.value = c.lora_bench_default_model || "";
+    } catch (e) { /* keep "(no default)" */ }
+  })();
   document.getElementById("s-copy").onclick = async () => {
     if (!tok) { toast("No token to copy"); return; }
     const ok = await copyToClipboard(tok);
@@ -1227,8 +2067,10 @@ async function saveSetup() {
     comfy_base: document.getElementById("s-comfy").value.trim(),
     output_root: document.getElementById("s-out").value.trim(),
     model_roots: document.getElementById("s-roots").value.split("\n").map(s=>s.trim()).filter(Boolean),
+    lora_roots: document.getElementById("s-lora-roots").value.split("\n").map(s=>s.trim()).filter(Boolean),
     default_seed: parseInt(document.getElementById("s-seed").value)||42,
     dark_mode: document.getElementById("s-dark").checked,
+    lora_bench_default_model: document.getElementById("s-lora-base")?.value || "",
   };
   await API.put("/config", body);
   auth.dark = body.dark_mode;

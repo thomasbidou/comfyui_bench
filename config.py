@@ -24,6 +24,7 @@ WORKFLOWS_PATH = os.path.join(STATE_DIR, "workflows.json")
 BENCHES_PATH = os.path.join(STATE_DIR, "benches.json")
 OUTPUTS_PATH = os.path.join(STATE_DIR, "outputs.json")
 USER_META_PATH = os.path.join(STATE_DIR, "user_meta.json")
+LORAS_PATH = os.path.join(STATE_DIR, "loras.json")
 
 # Default ComfyUI install + model roots (both editable in Setup).
 DEFAULTS = {
@@ -34,10 +35,14 @@ DEFAULTS = {
         os.path.expanduser("~/ComfyUI2/models/diffusion_models"),
     ],
     "output_root": os.path.expanduser("~/ComfyUI2/output"),
+    "lora_roots": [os.path.expanduser("~/Models/loras")],
     "host": "0.0.0.0",
     "port": 7860,
     "default_seed": 42,
     "dark_mode": True,
+    # Default base model for LoRA strength-sweep benches. Value is a model
+    # key (the model's absolute-path key), or None when unset.
+    "lora_bench_default_model": None,
 }
 
 
@@ -51,6 +56,10 @@ def ensure_state():
         if not os.path.exists(p):
             default = {} if ("benches" in p or "meta" in p) else []
             atomic_write_json(p, default)
+    # Lora cache: a dict {scanned_at, loras: []}. Seed empty so the first
+    # read triggers one synchronous scan instead of a missing-file error.
+    if not os.path.exists(LORAS_PATH):
+        atomic_write_json(LORAS_PATH, {"scanned_at": None, "loras": []})
     # Repair a user_meta.json that was ever written as a list (older versions
     # seeded it with []). merge_user_meta() expects a dict keyed by model key.
     try:
@@ -86,6 +95,12 @@ class Config:
         self._lock = threading.Lock()
         self._data = read_json(CONFIG_PATH, dict(DEFAULTS))
         self._data.setdefault("token", secrets.token_urlsafe(24))
+        # Backfill keys added after this install's config.json was written
+        # (e.g. lora_roots). setdefault only ADDS a missing key — it never
+        # overrides a value the user already chose, and it applies the
+        # DEFAULTS default for new keys so existing installs pick them up.
+        for k, v in DEFAULTS.items():
+            self._data.setdefault(k, v)
 
     def all(self):
         with self._lock:

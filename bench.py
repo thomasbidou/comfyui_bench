@@ -21,7 +21,7 @@ from typing import Optional
 from config import (BENCHES_PATH, OUTPUTS_PATH, config,
                     atomic_write_json, read_json)
 from comfy import ComfyUI
-from workflows import apply_overrides, model_name_for
+from workflows import apply_overrides, apply_lora_overrides, model_name_for
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +315,8 @@ class BenchRunner:
             return best
         return find_output_file(out_root, model_name)
 
-    def _wait_model(self, pid, model_name, model_key, timeout_s, stall_s=0):
+    def _wait_model(self, pid, model_name, model_key, timeout_s, stall_s=0,
+                    extra=None):
         deadline = time.time() + timeout_s
         last_progress = time.time()
 
@@ -340,7 +341,7 @@ class BenchRunner:
                     out_file = self._output_from_history(entry, model_name)
                     _finish("success", output=out_file)
                     if out_file:
-                        store.add_output({
+                        row = {
                             "id": f"{self.bench_id}:{model_key}",
                             "bench_id": self.bench_id,
                             "model_key": model_key,
@@ -350,7 +351,10 @@ class BenchRunner:
                             "seed": self.seed,
                             "output": out_file,
                             "created": time.time(),
-                        })
+                        }
+                        if extra is not None:
+                            row.update(extra)
+                        store.add_output(row)
                     return
                 if sstr in ("error", "cancelled"):
                     err = None
@@ -423,6 +427,98 @@ class BenchRunner:
                                  stall_s=stall_s)
 
 
+class LoraBenchRunner(BenchRunner):
+    """Strength-sweep runner: one base model + one LoRA, stepped through a
+    ladder of strength values (each step = one generation).
+
+    Subclasses BenchRunner (inheriting stop/was_stopped/_wait_model/
+    _output_from_history/_prompt_in_queue) but does NOT call super().__init__
+    — it carries lora/steps/model instead of a models list.
+    """
+
+    def __init__(self, bench_id, lora, steps, workflow, model, seed=None,
+                 prompt_text=None, prompt_node_id=None, strength_clip=None):
+        self.bench_id = bench_id
+        self.lora = lora
+        self.steps = list(steps)
+        self.workflow = workflow
+        self.model = model
+        self.seed = seed
+        self.prompt_text = prompt_text
+        self.prompt_node_id = prompt_node_id
+        self.strength_clip = strength_clip
+        self.comfy = ComfyUI(config.get("comfy_base") or "http://127.0.0.1:8188")
+        self._stop = threading.Event()
+        self._stopped = False
+
+    @staticmethod
+    def _step_key(i, s):
+        return "step_{i:03d}_{s:.4f}".format(i=i, s=float(s))
+
+    def run(self, timeout_s=900, stall_s=180):
+        model_name = model_name_for(self.model, self.workflow.get("loader_type"))
+        lora_name = self.lora.get("rel") or self.lora.get("name")
+
+        def mk(i, s):
+            return self._step_key(i, s)
+
+        # 1) queue all steps. Each step is independent: a failure marks THAT
+        #    step failed and moves on; a stop request cancels the rest.
+        for i, s in enumerate(self.steps):
+            key = mk(i, s)
+            if self._stop.is_set():
+                store.set_model_status(self.bench_id, key, status="cancelled")
+                continue
+            store.set_model_status(self.bench_id, key, status="queued")
+            try:
+                prompt = apply_lora_overrides(
+                    self.workflow["prompt"], self.workflow, model_name,
+                    lora_name, float(s), seed=self.seed,
+                    prompt_text=self.prompt_text,
+                    prompt_node_id=self.prompt_node_id,
+                    strength_clip=self.strength_clip,
+                    lora_node_id=self.workflow.get("lora_node_id"))
+                r = self.comfy.queue_prompt(prompt)
+            except Exception as e:
+                store.set_model_status(self.bench_id, key, status="queue_error",
+                                       error=str(e)[:400])
+                hub.publish({"type": "model_done", "bench_id": self.bench_id,
+                             "model_key": key, "status": "queue_error"})
+                continue
+            if not r.get("ok"):
+                store.set_model_status(self.bench_id, key, status="queue_error",
+                                       error=str(r.get("error"))[:400])
+                hub.publish({"type": "model_done", "bench_id": self.bench_id,
+                             "model_key": key, "status": "queue_error"})
+                continue
+            store.set_model_status(self.bench_id, key, status="running",
+                                   prompt_id=r.get("prompt_id"))
+            if r.get("prompt_id"):
+                _register_pid(r["prompt_id"], self.bench_id, key)
+            hub.publish({"type": "model_queued", "bench_id": self.bench_id,
+                         "model_key": key})
+
+        # 2) wait for each step (in order), tagging the output row with the
+        #    lora/strength context via _wait_model's extra.
+        for i, s in enumerate(self.steps):
+            key = mk(i, s)
+            b = store.get_bench(self.bench_id) or {}
+            st = (b.get("results") or {}).get(key, {})
+            if st.get("status") in ("queued", "running"):
+                if self._stop.is_set():
+                    store.set_model_status(self.bench_id, key, status="cancelled")
+                    continue
+                extra = {
+                    "kind": "lora",
+                    "lora_key": self.lora.get("key"),
+                    "lora_name": lora_name,
+                    "strength": float(s),
+                }
+                display = f"{self.model.get('name') or model_name}@{s}"
+                self._wait_model(st.get("prompt_id"), display, key, timeout_s,
+                                 stall_s=stall_s, extra=extra)
+
+
 # ---------------------------------------------------------------------------
 # Public API (FastAPI routes call these)
 #
@@ -487,6 +583,58 @@ def start_bench(models, workflow, seed=None, prompt_text=None,
     store.create_bench(bench)
     runner = BenchRunner(bench["id"], models, workflow, seed, prompt_text,
                          prompt_node_id)
+    with _queue_lock:
+        _queue.append((runner, timeout_s))
+        _queue_lock.notify()
+    # if nothing is running right now, tell the UI it will start imminently
+    with _active_lock:
+        will_start_now = not _active
+    if will_start_now:
+        hub.publish({"type": "bench_queued", "bench_id": bench["id"],
+                     "starting": True})
+    else:
+        hub.publish({"type": "bench_queued", "bench_id": bench["id"],
+                     "starting": False,
+                     "position": queue_position(bench["id"])})
+    return bench
+
+
+def start_lora_bench(lora, steps, workflow, model, seed=None, prompt_text=None,
+                     prompt_node_id=None, strength_clip=None, timeout_s=900):
+    """Create + enqueue a LoRA strength-sweep bench (one model + one LoRA).
+
+    Mirrors start_bench's bench-dict shape + enqueue block, but with kind
+    'lora', a single lora_key, and per-step model_keys.
+    """
+    steps = list(steps)
+    bench = {
+        "id": str(uuid.uuid4()),
+        "created": time.time(),
+        "finished": None,
+        "status": "queued",
+        "kind": "lora",
+        "workflow_id": workflow.get("id"),
+        "workflow_name": workflow.get("name"),
+        "base_model": (model or {}).get("display_name")
+                       or (model or {}).get("name"),
+        "base_model_key": (model or {}).get("key"),
+        "lora_key": lora.get("key"),
+        "lora_name": lora.get("display_name") or lora.get("name"),
+        "strength_min": steps[0],
+        "strength_max": steps[-1],
+        "strengths": list(steps),
+        "seed": seed,
+        "prompt": (prompt_text or "")[:2000],
+        "prompt_node_id": prompt_node_id,
+        "total": len(steps),
+        "done": 0,
+        "model_keys": ["step_{i:03d}_{s:.4f}".format(i=i, s=float(s))
+                       for i, s in enumerate(steps)],
+        "results": {},
+    }
+    store.create_bench(bench)
+    runner = LoraBenchRunner(bench["id"], lora, steps, workflow, model,
+                             seed, prompt_text, prompt_node_id, strength_clip)
     with _queue_lock:
         _queue.append((runner, timeout_s))
         _queue_lock.notify()

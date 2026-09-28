@@ -55,6 +55,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
 .muted{color:var(--dim)} .faint{color:var(--faint)} .small{font-size:12.5px}
 .row{display:flex;align-items:center;gap:10px} .space{justify-content:space-between}
+.row.sel{background:rgba(137,180,250,.14);color:var(--acc)}
 .wrap{flex-wrap:wrap} .grow{flex:1} .mt{margin-top:12px} .mb{margin-bottom:12px}
 .hidden{display:none!important}
 .badge{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600}
@@ -63,6 +64,8 @@ button{font:inherit;color:inherit;cursor:pointer}
 .badge.run{background:rgba(137,180,250,.15);color:var(--acc)}
 .badge.wait{background:rgba(249,226,175,.15);color:var(--warn)}
 .badge.mut{background:var(--bg3);color:var(--dim)}
+/* LoRA kind badge — distinct accent (teal) so sweeps read at a glance */
+.badge.lora{background:rgba(116,199,236,.16);color:var(--acc2)}
 
 /* buttons */
 .btn{padding:8px 14px;border-radius:var(--radius-s);border:1px solid var(--border2);
@@ -121,6 +124,11 @@ label.field .lab{font-size:12.5px;color:var(--dim);font-weight:600;margin-bottom
 .stars{color:var(--star);letter-spacing:1px;font-size:12px}
 .selcount{display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(137,180,250,.1);
   border:1px solid rgba(137,180,250,.35);border-radius:var(--radius-s);margin-bottom:14px}
+
+/* ---- "Load more" row (LoRAs grid pagination) ---- */
+#l-more-row{justify-content:center}
+#l-more-row .btn{padding:9px 22px;font-weight:600}
+#l-more-row .btn:hover{border-color:var(--acc);color:var(--acc)}
 
 /* ---- bench rows ---- */
 .benchrow{display:flex;align-items:center;gap:14px;padding:13px 14px;border:1px solid var(--border);
