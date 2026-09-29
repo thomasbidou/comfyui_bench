@@ -14,13 +14,16 @@ Routes:
   /api/outputs            list ; GET one
   /api/stats              ComfyUI system_stats
   /api/files?path=        serve a preview/output image (path-allowlisted)
+  /api/thumb?path=&size=  server-side image thumbnail (cached webp)
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
+import threading
 from typing import Optional
 
 from fastapi import (FastAPI, Request, Response, WebSocket,
@@ -43,8 +46,12 @@ from bench import (store, hub, start_bench, start_lora_bench, stop_bench, is_act
                    start_ws_listener_on_loop,
                    stop_ws_listener)
 from comfy import ComfyUI
+from PIL import Image
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+THUMB_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thumb_cache")
+THUMB_LOCK = threading.Lock()
+THUMB_IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 ensure_state()
 
 app = FastAPI(title="ComfyUI Bench", version="1.0")
@@ -1010,6 +1017,44 @@ def api_files(request: Request, path: str):
                 return FileResponse(ap)
             break
     raise HTTPException(status_code=403, detail="path not allowed")
+
+
+# ---------------------------------------------------------------------------
+# Image thumbnails (server-side, cached; grids use these instead of full-res)
+# ---------------------------------------------------------------------------
+@app.get("/api/thumb")
+def api_thumb(request: Request, path: str, size: int = 400):
+    require_auth(request)
+    size = max(64, min(2048, int(size)))
+    allowed_roots = list(config.get("model_roots") or []) + \
+                    list(config.get("lora_roots") or []) + \
+                    [(config.get("output_root") or "")]
+    ap = os.path.abspath(path)
+    allowed = any(root and (ap == os.path.abspath(root) or
+                            ap.startswith(os.path.abspath(root) + os.sep))
+                  for root in allowed_roots)
+    if not allowed or not os.path.isfile(ap):
+        raise HTTPException(status_code=403, detail="path not allowed")
+    # Non-image (e.g. video previews): fall back to the original file.
+    if os.path.splitext(ap)[1].lower() not in THUMB_IMG_EXTS:
+        return FileResponse(ap)
+    st = os.stat(ap)
+    os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
+    cache_path = os.path.join(
+        THUMB_CACHE_DIR,
+        hashlib.sha256(
+            f"{ap}|{size}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()
+        + ".webp")
+    if not os.path.exists(cache_path):
+        with THUMB_LOCK:
+            if not os.path.exists(cache_path):
+                with Image.open(ap) as im:
+                    if im.mode not in ("RGB", "L"):
+                        im = im.convert("RGB")
+                    im.thumbnail((size, size), Image.Resampling.LANCZOS)
+                    im.save(cache_path, "WEBP", quality=80)
+    return FileResponse(cache_path, media_type="image/webp",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 # ---------------------------------------------------------------------------

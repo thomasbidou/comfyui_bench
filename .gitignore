@@ -15,3 +15,4 @@ state/
 *.log
 .idea/
 .vscode/
+thumb_cache/

@@ -37,6 +37,7 @@ class AuthError extends Error {}
 class ApiError extends Error { constructor(s, d) { super(d); this.status = s; this.detail = d; } }
 
 function fileUrl(p) { return "/api/files?path=" + encodeURIComponent(p); }
+function thumbUrl(p, size) { return "/api/thumb?path=" + encodeURIComponent(p) + "&size=" + (size || 400); }
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c =>
   ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c])); }
 function fmtBytes(n) { if (!n) return "—";
@@ -481,7 +482,7 @@ function renderModelGrid(models) {
           src="${fileUrl(m.preview)}"
           onerror="this.outerHTML='<div class=&quot;thumb placeholder&quot;>no preview</div>'"></video>`;
       } else {
-        thumb = `<img class="thumb" loading="lazy" src="${fileUrl(m.preview)}" onerror="this.outerHTML='<div class=&quot;thumb placeholder&quot;>no image</div>'">`;
+        thumb = `<img class="thumb" loading="lazy" src="${thumbUrl(m.preview)}" onerror="this.outerHTML='<div class=&quot;thumb placeholder&quot;>no image</div>'">`;
       }
     } else {
       thumb = `<div class="thumb placeholder">no preview</div>`;
@@ -629,7 +630,7 @@ async function renderModelOutputs(el, m) {
   if (!outs.length) { el.innerHTML = `<div class="empty">No outputs for this model yet.</div>`; return; }
   el.innerHTML = `<div class="ogrid">` + outs.map(o => `
     <div class="ocell" data-out="${esc(o.id)}">
-      <img loading="lazy" src="${fileUrl(o.output)}">
+      <img loading="lazy" src="${thumbUrl(o.output)}">
       <div class="lbl">${esc(o.workflow_name||"")} · ${new Date(o.created*1000).toLocaleDateString()}</div>
     </div>`).join("") + `</div>
     <div class="row mt"><button class="btn" data-cmp>Compare selected</button>
@@ -888,7 +889,7 @@ function renderLoraGrid() {
           src="${fileUrl(m.preview)}"
           onerror="this.outerHTML='<div class=&quot;thumb placeholder&quot;>no preview</div>'"></video>`;
       } else {
-        thumb = `<img class="thumb" loading="lazy" src="${fileUrl(m.preview)}" onerror="this.outerHTML='<div class=&quot;thumb placeholder&quot;>no image</div>'">`;
+        thumb = `<img class="thumb" loading="lazy" src="${thumbUrl(m.preview)}" onerror="this.outerHTML='<div class=&quot;thumb placeholder&quot;>no image</div>'">`;
       }
     } else {
       thumb = `<div class="thumb placeholder">no preview</div>`;
@@ -1904,7 +1905,7 @@ async function renderOutputs() {
           <path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5C21.27 7.61 17 4.5 12 4.5zM12 17a5 5 0 110-10 5 5 0 010 10zm0-8a3 3 0 100 6 3 3 0 000-6z"/>
         </svg>
       </button>
-      <img loading="lazy" src="${fileUrl(o.output)}">
+      <img loading="lazy" src="${thumbUrl(o.output)}">
       <div class="lbl">${esc(o.model_name||"")} · ${esc(o.workflow_name||"")}</div>
       ${loraLine}
       <div class="lbl faint">${new Date(o.created*1000).toLocaleDateString()}</div>
