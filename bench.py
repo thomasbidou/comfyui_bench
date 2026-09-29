@@ -255,6 +255,7 @@ class BenchRunner:
         self.comfy = ComfyUI(config.get("comfy_base") or "http://127.0.0.1:8188")
         self._stop = threading.Event()
         self._stopped = False
+        self._bench_since: Optional[float] = None
 
     def stop(self):
         """Request an abort: stop queuing more models, abort the one running
@@ -313,7 +314,39 @@ class BenchRunner:
                             best_size, best = size, path
         if best:
             return best
+        # Fallback: custom save nodes (e.g. 'Image Saver') don't register in
+        # history outputs, and PreviewImage is type=temp (filtered above).
+        # Pick the newest image file written since this bench started.
+        if getattr(self, "_bench_since", None) is not None:
+            best2 = self._newest_output_file(self._bench_since)
+            if best2:
+                return best2
         return find_output_file(out_root, model_name)
+
+    def _newest_output_file(self, since_ts, margin=30):
+        """Newest image/video file under output_root created after since_ts.
+        Fallback for workflows whose saver is a custom node (e.g. 'Image Saver')
+        that doesn't register in ComfyUI history, or a PreviewImage (type=temp).
+        Benches run steps sequentially (ComfyUI does one prompt at a time, FIFO)
+        and we capture in that same order, so the newest file is this step's."""
+        out_root = config.get("output_root") or ""
+        if not out_root or not os.path.isdir(out_root):
+            return None
+        lo = (since_ts or 0) - margin
+        exts = (".png", ".webp", ".jpg", ".jpeg", ".gif", ".mp4", ".webm")
+        best, best_mt = None, -1.0
+        for root, _dirs, files in os.walk(out_root):
+            for fn in files:
+                if not fn.lower().endswith(exts):
+                    continue
+                p = os.path.join(root, fn)
+                try:
+                    mt = os.path.getmtime(p)
+                except OSError:
+                    continue
+                if mt >= lo and mt > best_mt:
+                    best_mt, best = mt, p
+        return best
 
     def _wait_model(self, pid, model_name, model_key, timeout_s, stall_s=0,
                     extra=None):
@@ -378,6 +411,7 @@ class BenchRunner:
         _finish("timeout")
 
     def run(self, timeout_s=900, stall_s=180):
+        self._bench_since = time.time()
         # 1) queue all models. Each model is independent: a failure here
         #    (bad filename, loader mismatch, ComfyUI rejecting the prompt,
         #    a network blip) marks THAT model failed and moves to the next —
@@ -450,12 +484,14 @@ class LoraBenchRunner(BenchRunner):
         self.comfy = ComfyUI(config.get("comfy_base") or "http://127.0.0.1:8188")
         self._stop = threading.Event()
         self._stopped = False
+        self._bench_since: Optional[float] = None
 
     @staticmethod
     def _step_key(i, s):
         return "step_{i:03d}_{s:.4f}".format(i=i, s=float(s))
 
     def run(self, timeout_s=900, stall_s=180):
+        self._bench_since = time.time()
         model_name = model_name_for(self.model, self.workflow.get("loader_type"))
         lora_name = self.lora.get("rel") or self.lora.get("name")
 
