@@ -76,18 +76,20 @@ frontend.
 - **Token auth** — a single access token gates the UI so it's safe to expose on
   a trusted LAN.
 
-> ### 🔎 Known issue — LoRA bench produces no output (open)
-> A LoRA strength-sweep bench currently **completes without producing images**
-> when run from the UI. The sweep logic, output-capture, and config wiring are
-> all in place and unit-verified, but an end-to-end run reported "no output."
-> Root cause still to be diagnosed (suspect: output capture not matching the
-> generated `SaveImage` node, or the base model + LoRA pairing failing at
-> prompt time). **Do not treat the LoRA bench as done until this is fixed and
-> re-verified end-to-end.**
+> ### 🖼️ Grids load thumbnails; full-res is reserved for inspection
+> Bench outputs are full 3072×3072 images (7–14 MB each). To keep the
+> Outputs / Models / LoRAs grids fast, grid cells are served as **server-side
+> WebP thumbnails** (`GET /api/thumb`, Pillow-generated, cached in
+> `thumb_cache/`) — a 14 MB PNG becomes ~100 KB. The **compare slider** and
+> the **full-size single-image viewer** still load the original full-res file
+> (via `/api/files`), so close inspection and A/B comparison stay pixel-exact.
+> `thumb_cache/` is content+mtime keyed and safe to delete at any time
+> (thumbnails regenerate on demand).
 
 ## Requirements
 
 - Python **3.10+** (3.12 tested)
+- **Pillow** (grid thumbnails — installed with `requirements.txt`)
 - A **running** ComfyUI server (the app talks to its HTTP + WebSocket API; it
   does not host ComfyUI itself)
 - Models with a preview next to the weight file (the app auto-discovers the
