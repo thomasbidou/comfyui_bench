@@ -61,6 +61,13 @@ frontend.
   generating one image per strength so you can dial in the right LoRA weight.
   The base model, the LoRA, and the strengths are all configurable; a
   **default base model** (set on the Setup page) is pre-selected for you.
+  Both pickers (base model *and* LoRA) are **folder-tree browsers** with
+  search + sort + **progressive loading**, and **hovering any row** pops a
+  small preview box (image, or a static first frame for video previews) so
+  you can eyeball a model/LoRA before picking it.
+- **Selected chips** — on the Run Bench page, every model/LoRA you select
+  shows up as a **chip** above its list; remove one with its ✕ and the
+  selection follows.
 - **Workflows** — store, rename, and delete multiple test workflows (ComfyUI
   API-format JSON prompts). On add/upload, if the workflow contains LoRA
   nodes you choose its **intent**: a **Model workflow** (kept as-is, usable
@@ -68,7 +75,11 @@ frontend.
   workflow** (then pick which node the bench sweeps). A workflow with LoRA
   nodes can therefore live as a model workflow.
 - **Home / history** — every bench you've run, with status and quick links to
-  its outputs.
+  its outputs. Each row has an **expandable settings panel** (prompt, seed,
+  strengths, model/LoRA) that stays open while the bench is still running, a
+  **Rerun** button that re-opens the Run Bench tab pre-filled with that
+  bench's exact configuration, **🔍 filter** across titles and model/LoRA
+  names, and **sort** by date / name / status.
 - **Setup page** — ComfyUI URL, model roots, LoRA roots, output root, default
   seed, **default base model for the LoRA bench**, dark/light theme, and the
   access token (copy / regenerate).

@@ -48,6 +48,77 @@ function fmtTime(ts) { if (!ts) return "—";
 function stars(n) { n=Math.max(0,Math.min(5,n|0)); return "★".repeat(n)+"☆".repeat(5-n); }
 
 // ---------------------------------------------------------------------------
+// Hover preview box (Run-bench lists): one shared floating box on
+// document.body that shows a model/LoRA's preview thumb near the cursor.
+// Delegated to the three persistent list containers (they only swap innerHTML
+// on re-render, so their listeners survive), and pointer-events:none so it
+// never steals a row click/checkbox. Markup mirrors the grid thumb (image vs
+// video). hoverHide() is called from navigate() to clear it on page/tab change.
+// ---------------------------------------------------------------------------
+let hoverBox = null;
+let hoverMedia = null;
+let hoverKey = null; // the row currently shown (avoids re-loading the image while moving within one row)
+function ensureHoverBox() {
+  if (hoverBox) return hoverBox;
+  hoverBox = document.createElement("div");
+  hoverBox.className = "hoverthumb";
+  hoverMedia = document.createElement("div");
+  hoverBox.appendChild(hoverMedia);
+  document.body.appendChild(hoverBox);
+  return hoverBox;
+}
+function hoverHide() {
+  if (hoverBox) hoverBox.style.display = "none";
+  hoverKey = null;
+}
+function hoverShow(key, m) {
+  if (key === hoverKey && hoverMedia.innerHTML) return; // same row -> no flicker
+  hoverKey = key;
+  ensureHoverBox(); // must create hoverMedia before touching it
+  let html;
+  if (m && m.preview) {
+    if (m.preview_kind === "video") {
+      // static first frame (matches the grid cards: muted, no autoplay)
+      html = `<video class="thumb" muted playsinline preload="metadata" src="${fileUrl(m.preview)}"></video>`;
+    } else {
+      // 360 = 2x the 180px box for crisp retina rendering (server caches webp)
+      html = `<img class="thumb" loading="lazy" src="${thumbUrl(m.preview, 360)}">`;
+    }
+  } else {
+    html = `<div class="thumb placeholder">no preview</div>`;
+  }
+  hoverMedia.innerHTML = html;
+  hoverBox.style.display = "block";
+}
+function hoverMove(e) {
+  if (!hoverBox || hoverBox.style.display === "none") return;
+  const pad = 14, w = hoverBox.offsetWidth, h = hoverBox.offsetHeight;
+  let x = e.clientX + pad, y = e.clientY + pad;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  if (x + w > vw - 8) x = e.clientX - w - pad; // overflow right  -> flip to the left
+  if (y + h > vh - 8) y = e.clientY - h - pad; // overflow bottom -> flip up
+  if (x < 8) x = 8; if (y < 8) y = 8;
+  hoverBox.style.left = x + "px"; hoverBox.style.top = y + "px";
+}
+function attachHoverPreview(container, resolveFn) {
+  if (!container || container.__hoverBound) return;
+  container.__hoverBound = true;
+  container.addEventListener("mouseover", (e) => {
+    const row = e.target.closest(".row");
+    if (!row || !row.dataset.key) { hoverHide(); return; }
+    const m = resolveFn(row.dataset.key);
+    if (!m) { hoverHide(); return; }
+    hoverShow(row.dataset.key, m);
+    hoverMove(e);
+  });
+  container.addEventListener("mousemove", hoverMove);
+  container.addEventListener("mouseout", (e) => {
+    if (!container.contains(e.relatedTarget)) hoverHide(); // left the list -> hide
+  });
+  container.addEventListener("mouseleave", hoverHide);
+}
+
+// ---------------------------------------------------------------------------
 // Toast
 // ---------------------------------------------------------------------------
 function toast(msg, ms=3200) {
@@ -166,6 +237,7 @@ async function navigate() {
   document.querySelectorAll("#nav a").forEach(a => {
     a.classList.toggle("active", a.getAttribute("href") === "#/" + route.name);
   });
+  hoverHide(); // clear any hover-preview box before tearing down the page
   const view = document.getElementById("view");
   view.innerHTML = `<div class="empty"><span class="spin2"></span>&nbsp; loading…</div>`;
   try {
@@ -272,6 +344,31 @@ function closeModal() {
 // PAGE: Home (bench history) — event-delegated so re-renders don't kill clicks
 // ===========================================================================
 let homePoll = null;
+const expandedBenches = new Set();   // bench ids whose settings panel is open (survives re-renders)
+let homeFilter = "";                 // search — matches workflow/model/lora names (case-insensitive)
+let homeSort = "date";               // date | name | status | kind
+
+function applyHomeSort(benches) {
+  const q = homeFilter.trim().toLowerCase();
+  const filtered = q ? benches.filter(b => {
+    const hay = [b.workflow_name, b.base_model, b.lora_name]
+      .concat(Array.isArray(b.model_keys) ? b.model_keys : [])
+      .filter(Boolean).join(" ").toLowerCase();
+    return hay.includes(q);
+  }) : benches;
+  const keymap = {
+    date:   b => -(b.created || 0),
+    name:   b => (b.workflow_name || "").toLowerCase(),
+    status: b => (b.status || ""),
+    kind:   b => (b.kind || "model"),
+  };
+  const key = keymap[homeSort] || keymap.date;
+  return [...filtered].sort((a, b) => {
+    const ka = key(a), kb = key(b);
+    if (typeof ka === "number" && typeof kb === "number") return ka - kb;
+    return String(ka).localeCompare(String(kb));
+  });
+}
 async function renderHome() {
   clearInterval(homePoll);
   const view = document.getElementById("view");
@@ -281,10 +378,24 @@ async function renderHome() {
       <div class="muted small" id="home-count"></div></div>
       <button class="btn primary" id="home-run">+ Run new bench</button>
     </div>
+    <div class="toolbar home-bar mb">
+      <input class="search" id="hf-q" placeholder="Filter by workflow, model, or LoRA name…" value="">
+      <select id="hf-sort" style="width:auto">
+        <option value="date">Sort: newest first</option>
+        <option value="name">Sort: name A→Z</option>
+        <option value="status">Sort: status</option>
+        <option value="kind">Sort: kind</option>
+      </select>
+    </div>
     <div id="home-list"></div>`;
   document.getElementById("home-run").onclick = () => location.hash = "#/bench";
   // Delegate all row interactions to the container (survives re-renders).
   if (!view._homeBound) { view.addEventListener("click", benchClickHandler); view._homeBound = true; }
+  // Filter / sort bar
+  const hfq = document.getElementById("hf-q");
+  if (hfq) hfq.oninput = e => { homeFilter = e.target.value.trim(); refreshHomeList(); };
+  const hfs = document.getElementById("hf-sort");
+  if (hfs) hfs.onchange = e => { homeSort = e.target.value; refreshHomeList(); };
   refreshHomeList();
   homePoll = setInterval(refreshHomeList, 2500);
   refreshIndicator();
@@ -293,10 +404,24 @@ function refreshHomeList() {
   API.get("/benches").then(d => {
     const el = document.getElementById("home-list");
     if (!el) return;
-    el.innerHTML = d.benches.map(benchRow).join("") ||
-      `<div class="empty">No benches yet. Run your first bench from "Run bench".</div>`;
+    const rows = applyHomeSort(d.benches);
+    el.innerHTML = rows.map(benchRow).join("") ||
+      `<div class="empty">No benches${homeFilter ? " match \"" + esc(homeFilter) + "\"" : " yet"}.</div>`;
     const c = document.getElementById("home-count");
-    if (c) c.textContent = `${d.benches.length} run(s)`;
+    if (c) c.textContent = `${rows.length} run(s)`;
+    // Attach the full bench object to each row so the Rerun / settings
+    // handlers can read the run's real settings without a second fetch.
+    const byId = new Map(d.benches.map(b => [b.id, b]));
+    el.querySelectorAll(".benchrow").forEach(row => { row.__bench = byId.get(row.dataset.bid); });
+    // Re-apply expanded state (survives innerHTML rebuild)
+    el.querySelectorAll(".benchwrap").forEach(wrap => {
+      const bid = wrap.querySelector(".benchrow")?.dataset.bid;
+      if (bid && expandedBenches.has(bid)) {
+        wrap.classList.add("open");
+        const panel = wrap.querySelector(".benchsettings");
+        if (panel) panel.classList.remove("hidden");
+      }
+    });
   }).catch(() => {});
 }
 function benchClickHandler(e) {
@@ -304,6 +429,7 @@ function benchClickHandler(e) {
   const row = e.target.closest(".benchrow");
   if (!row) return;
   const bid = row.dataset.bid;
+  const bench = row.__bench;
   if (btn) {
     const act = btn.dataset.act;
     if (act === "del") {
@@ -326,10 +452,74 @@ function benchClickHandler(e) {
         .catch(err => toast(err.message));
       return;
     }
+    if (act === "settings") {
+      e.stopPropagation();
+      toggleBenchSettings(row);
+      return;
+    }
+    if (act === "rerun") {
+      e.stopPropagation();
+      if (!bench) return;
+      startBenchRerun(bench);
+      return;
+    }
   }
   // row click -> outputs for this bench (LoRA benches land on the LoRA tab)
   const bk = row.dataset.bk || "model";
   location.hash = "#/outputs?bench=" + encodeURIComponent(bid) + (bk === "lora" ? "&kind=lora" : "");
+}
+function startBenchRerun(b) {
+  const isLora = (b.kind || "model") === "lora";
+  // Reuse the existing bench-card prefill mechanism: stash the run's settings
+  // and land on the correct tab (model vs lora) with values pre-selected.
+  const payload = {
+    kind: isLora ? "lora" : "model",
+    workflow_id: b.workflow_id || null,
+    seed: b.seed != null ? b.seed : null,
+    prompt: b.prompt || null,
+    prompt_node_id: b.prompt_node_id || null,
+    model_keys: (b.model_keys && !isLora) ? b.model_keys.slice(0) : null,
+    base_model_key: isLora ? (b.base_model_key || null) : null,
+    lora_key: isLora ? (b.lora_key || null) : null,
+    strength_min: isLora ? (b.strength_min != null ? b.strength_min : null) : null,
+    strength_max: isLora ? (b.strength_max != null ? b.strength_max : null) : null,
+    strengths: isLora && Array.isArray(b.strengths) ? b.strengths.slice() : null,
+  };
+  try { localStorage.setItem("cb_pending_rerun", JSON.stringify(payload)); } catch {}
+  // Same-tab hash (e.g. bench -> bench?tab=lora) does NOT re-fire hashchange,
+  // so navigate explicitly to guarantee the bench page renders on the right tab.
+  if (location.hash === "#/bench?tab=" + (isLora ? "lora" : "model")) { navigate(); }
+  else { location.hash = "#/bench?tab=" + (isLora ? "lora" : "model"); }
+}
+function toggleBenchSettings(row) {
+  const wrap = row.closest(".benchwrap") || row;
+  const panel = wrap.querySelector(".benchsettings");
+  if (!panel) return;
+  const bid = wrap.querySelector(".benchrow")?.dataset.bid;
+  const open = wrap.classList.toggle("open");
+  panel.classList.toggle("hidden", !open);
+  if (bid) { if (open) expandedBenches.add(bid); else expandedBenches.delete(bid); }
+}
+function benchSettingsHTML(b, isLora) {
+  const rows = [];
+  const add = (k, v) => { if (v !== null && v !== undefined && v !== "") rows.push(`<span class="k">${k}</span><span class="v">${v}</span>`); };
+  add("Workflow", esc(b.workflow_name || "—"));
+  if (isLora) {
+    add("Base model", esc(b.base_model || b.base_model_key || "—"));
+    add("LoRA", esc(b.lora_name || b.lora_key || "—"));
+    if (b.strength_min != null && b.strength_max != null) add("Strength", `${Number(b.strength_min).toFixed(2)} → ${Number(b.strength_max).toFixed(2)}`);
+    if (Array.isArray(b.strengths) && b.strengths.length) add("Steps", b.strengths.map(s => Number(s).toFixed(2)).join(", "));
+  } else {
+    if (Array.isArray(b.model_keys) && b.model_keys.length) add("Models", b.model_keys.map(esc).join(", "));
+  }
+  add("Seed", esc(b.seed != null ? b.seed : "—"));
+  if (b.prompt) add("Prompt", `<span style="white-space:pre-wrap">${esc(b.prompt)}</span>`);
+  if (b.prompt_node_id != null && b.prompt_node_id !== "") add("Prompt node", esc(b.prompt_node_id));
+  add("Status", esc(b.status || "—") + (b.active ? " (running)" : ""));
+  add("Progress", `${b.done}/${b.total}`);
+  add("Created", new Date(b.created*1000).toLocaleString());
+  if (b.finished) add("Finished", new Date(b.finished*1000).toLocaleString());
+  return `<div class="kv">${rows.join("")}</div>`;
 }
 function benchRow(b) {
   const pct = b.total ? Math.min(100, Math.round(100*b.done/b.total)) : 0;
@@ -352,7 +542,8 @@ function benchRow(b) {
     ? `<span class="badge lora" title="LoRA strength sweep">LoRA${(b.strength_min!=null && b.strength_max!=null) ? ` ${Number(b.strength_min).toFixed(2)}–${Number(b.strength_max).toFixed(2)}` : ""}</span>`
     : "";
   const outHref = "#/outputs?bench=" + encodeURIComponent(b.id) + (isLora ? "&kind=lora" : "");
-  return `<div class="benchrow" data-bid="${esc(b.id)}" data-bk="${isLora ? "lora" : "model"}">
+  return `<div class="benchwrap">
+  <div class="benchrow" data-bid="${esc(b.id)}" data-bk="${isLora ? "lora" : "model"}">
     <div style="min-width:150px">
       <div class="title">${esc(b.workflow_name||"bench")} ${kindBadge}</div>
       <div class="sub">${new Date(b.created*1000).toLocaleString()} · ${isLora ? b.total + " strength step(s)" : b.total + " model(s)"} · seed ${esc(b.seed??"—")}</div>
@@ -361,8 +552,14 @@ function benchRow(b) {
     <div class="pct">${b.done}/${b.total}</div>
     ${badge}
     ${stopBtn}
+    <button class="btn small" data-act="settings" data-bid="${esc(b.id)}" title="Show / hide the run's settings"><span class="caret">▾</span> settings</button>
+    <button class="btn small primary" data-act="rerun" data-bid="${esc(b.id)}" title="Re-open the bench form with this run's settings">Rerun</button>
     <button class="btn small" data-act="view" data-bid="${esc(b.id)}" data-out="${esc(outHref)}">Outputs</button>
     <button class="btn small danger" data-act="del" data-bid="${esc(b.id)}">✕</button>
+  </div>
+  <div class="benchsettings hidden" data-bid="${esc(b.id)}">
+    ${benchSettingsHTML(b, isLora)}
+  </div>
   </div>`;
 }
 
@@ -376,7 +573,10 @@ let loraState = { root: "", folder: "", q: "", sort: "name", loras: [], rendered
 // Bench-card-local LoRA picker state (separate from loraState so the
 // LoRAs page and the bench card can coexist without clobbering each other).
 let lbLora = { root: "", folder: "", q: "", sort: "name", loras: [], rendered: 0, selected: "", total: 0 };
+let lbBase = { root: "", folder: "", q: "", sort: "name", models: [], rendered: 0, selected: "", total: 0 };
 const LORA_CHUNK = 200; // render in chunks — a LoRA folder can hold thousands of files
+const BASE_CHUNK = 200;
+let lbBaseQTimer = null;
 
 async function renderModels() {
   const view = document.getElementById("view");
@@ -723,10 +923,127 @@ async function loadLoraTree() {
 }
 
 // ---------------------------------------------------------------------------
-// Lora Bench card: folder-tree + filtered list picker (bench-local state).
-// Mirrors the LoRAs page tree/list patterns but feeds a hidden #lb-lora
-// input (single selection, no multi-select).
+// Base-model picker (bench LoRA tab): folder tree (left) + server-filtered
+// chunked list (right), same box size as the LoRA picker. Feeds a hidden
+// #lb-base input (single selection) — same pattern as the LoRA picker.
 // ---------------------------------------------------------------------------
+function lbBaseSelectTreeNode(el, n) {
+  el.querySelectorAll(".node").forEach(x => x.classList.remove("sel"));
+  n.classList.add("sel");
+  lbBase.root = n.dataset.root || "";
+  lbBase.folder = n.dataset.folder || "";
+  loadLbBaseModels();
+}
+async function lbBaseLoadTree() {
+  const el = document.getElementById("lb-base-tree");
+  if (!el) return;
+  let tree;
+  try { tree = await API.get("/models/tree"); }
+  catch (e) { el.innerHTML = `<span class="muted">${esc(e.message)}</span>`; return; }
+  el.innerHTML = renderTree(tree.tree, null);
+  el.querySelectorAll(".node").forEach(n => n.onclick = () => lbBaseSelectTreeNode(el, n));
+  const first = el.querySelector(".node.root");
+  if (first) { first.classList.add("sel"); lbBase.root = first.dataset.root; }
+  await loadLbBaseModels();
+  // restore selection highlight + chip for any pre-filled key
+  if (lbBase.selected) {
+    const list = document.getElementById("lb-base-list");
+    if (list) list.querySelectorAll(".row[data-key]").forEach(r =>
+      r.classList.toggle("sel", r.dataset.key === lbBase.selected));
+    renderLbBaseChips();
+  }
+}
+async function loadLbBaseModels() {
+  const params = new URLSearchParams();
+  if (lbBase.root) params.set("root", lbBase.root);
+  if (lbBase.folder) params.set("folder", lbBase.folder);
+  if (lbBase.q) params.set("q", lbBase.q);
+  params.set("sort", lbBase.sort || "name");
+  let d;
+  try { d = await API.get("/models?" + params.toString()); }
+  catch (e) { lbBase.models = []; lbBase.total = 0; lbBase.rendered = 0; renderLbBaseList(); return; }
+  lbBase.models = d.models || [];
+  lbBase.total = d.total != null ? d.total : (d.count != null ? d.count : lbBase.models.length);
+  lbBase.rendered = BASE_CHUNK;
+  renderLbBaseList();
+}
+function lbSelectBaseModel(key) {
+  lbBase.selected = key;
+  const hidden = document.getElementById("lb-base");
+  if (hidden) {
+    hidden.value = key;
+    setTimeout(() => { try { hidden.dispatchEvent(new Event("change")); } catch (e) {} }, 0);
+  }
+  const list = document.getElementById("lb-base-list");
+  if (list) list.querySelectorAll(".row[data-key]").forEach(r =>
+    r.classList.toggle("sel", r.dataset.key === key));
+  renderLbBaseChips();
+}
+function renderLbBaseChips() {
+  const box = document.getElementById("lb-base-chips");
+  if (!box) return;
+  if (!lbBase.selected) {
+    box.innerHTML = `<span class="chips-empty">No base model selected — pick one from the tree + list above.</span>`;
+    return;
+  }
+  const hit = (lbBase.models || []).find(m => m.key === lbBase.selected) || {};
+  const label = hit.display_name || hit.name || lbBase.selected.split("/").pop() || lbBase.selected;
+  box.innerHTML = `<span class="chip" data-key="${esc(lbBase.selected)}" title="${esc(lbBase.selected)}">
+    <span class="chip-label">🧩 ${esc(label)}</span>
+    <button class="chip-x" data-x="${esc(lbBase.selected)}" title="Remove" aria-label="Remove ${esc(label)}">×</button>
+  </span>`;
+  box.querySelectorAll(".chip-x").forEach(b => b.onclick = () => {
+    lbBase.selected = "";
+    const hidden = document.getElementById("lb-base");
+    if (hidden) { hidden.value = ""; hidden.dispatchEvent(new Event("change")); }
+    const list = document.getElementById("lb-base-list");
+    if (list) list.querySelectorAll(".row[data-key]").forEach(r => r.classList.remove("sel"));
+    renderLbBaseChips();
+  });
+}
+function renderLbBaseList() {
+  const list = document.getElementById("lb-base-list");
+  if (!list) return;
+  const slice = lbBase.models.slice(0, lbBase.rendered);
+  list.innerHTML = slice.map(m => `<label class="row" style="cursor:pointer;padding:4px 8px;border-radius:4px" data-key="${esc(m.key)}">
+    <span class="grow" style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(m.key)}">${esc(m.display_name || m.name)}</span>
+    <span class="faint small" style="white-space:nowrap">${esc(m.folder || "/")}</span>
+  </label>`).join("") || `<div class="empty">No models match.</div>`;
+  list.querySelectorAll(".row[data-key]").forEach(r =>
+    r.classList.toggle("sel", r.dataset.key === lbBase.selected));
+  const cnt = document.getElementById("lb-base-cnt");
+  if (cnt) cnt.textContent = `${lbBase.total} model(s)`;
+  const more = document.getElementById("lb-base-more");
+  if (more) {
+    if (lbBase.rendered < lbBase.total) {
+      const remaining = lbBase.total - lbBase.rendered;
+      more.innerHTML = `<span class="grow"></span><button class="btn small" id="lb-base-more-btn">Load ${Math.min(BASE_CHUNK, remaining)} more…</button><span class="grow"></span>`;
+      // /api/models returns the full filtered list (limit/offset ignored), so
+      // "Load more" just renders the next slice of what we already hold.
+      document.getElementById("lb-base-more-btn").onclick = () => {
+        lbBase.rendered = Math.min(lbBase.total, lbBase.rendered + BASE_CHUNK);
+        renderLbBaseList();
+      };
+    } else {
+      more.innerHTML = "";
+    }
+  }
+  list.querySelectorAll(".row[data-key]").forEach(r =>
+    r.onclick = (e) => { e.preventDefault(); lbSelectBaseModel(r.dataset.key); });
+  renderLbBaseChips();
+}
+function bindLbBaseFilter() {
+  const q = document.getElementById("lb-base-q");
+  if (!q) return;
+  q.oninput = (e) => {
+    if (lbBaseQTimer) clearTimeout(lbBaseQTimer);
+    lbBaseQTimer = setTimeout(() => {
+      lbBase.q = e.target.value.trim();
+      lbBase.rendered = BASE_CHUNK;
+      loadLbBaseModels();
+    }, 300);
+  };
+}
 function lbSelectTreeNode(el, n) {
   el.querySelectorAll(".node").forEach(x => x.classList.remove("sel"));
   n.classList.add("sel");
@@ -781,7 +1098,32 @@ function lbSetSelectedLora(key) {
       r.classList.toggle("sel", r.dataset.key === key);
     });
   }
+  renderLbChip();
 }
+function renderLbChip() {
+  const box = document.getElementById("lb-chips");
+  if (!box) return;
+  const key = lbLora.selected;
+  if (!key) {
+    box.innerHTML = `<span class="chips-empty">No LoRA selected — pick one from the tree + list above.</span>`;
+    return;
+  }
+  const hit = (lbLora.loras || []).find(m => m.key === key) || {};
+  const label = hit.display_name || hit.name || key.split("/").pop() || key;
+  box.innerHTML = `<span class="chip" data-key="${esc(key)}" title="${esc(key)}">
+    <span class="chip-label">🔁 ${esc(label)}</span>
+    <button class="chip-x" data-x="${esc(key)}" title="Remove" aria-label="Remove ${esc(label)}">×</button>
+  </span>`;
+  box.querySelectorAll(".chip-x").forEach(b => b.onclick = () => {
+    lbLora.selected = "";
+    const hidden = document.getElementById("lb-lora");
+    if (hidden) { hidden.value = ""; hidden.dispatchEvent(new Event("change")); }
+    const list = document.getElementById("lb-lora-list");
+    if (list) list.querySelectorAll(".row[data-key]").forEach(r => r.classList.remove("sel"));
+    renderLbChip();
+  });
+}
+
 function renderLbLoraList() {
   const list = document.getElementById("lb-lora-list");
   if (!list) return;
@@ -823,6 +1165,7 @@ function renderLbLoraList() {
   list.querySelectorAll(".row[data-key]").forEach(r => {
     r.onclick = (e) => { e.preventDefault(); lbSetSelectedLora(r.dataset.key); };
   });
+  renderLbChip();
 }
 let lbLoraQTimer = null;
 function bindLbLoraFilter() {
@@ -861,6 +1204,7 @@ async function lbApplyPendingLora(pendingLora) {
   if (qEl) qEl.value = "";
   await loadLbLoras();
   lbSetSelectedLora(pendingLora);
+  renderLbChip();
 }
 async function loadLoras() {
   const params = new URLSearchParams();
@@ -1556,6 +1900,12 @@ async function renderBench() {
   const pendingWf = localStorage.getItem("cb_pending_wf");
   const pendingLora = localStorage.getItem("cb_pending_lora");
   localStorage.removeItem("cb_pending_models"); localStorage.removeItem("cb_pending_wf"); localStorage.removeItem("cb_pending_lora");
+  // Rerun payload (from a home-page Rerun button): full settings of an existing
+  // bench to pre-fill this form. Cleared here so a manual re-open of the bench
+  // page never re-applies it.
+  let rerun = null;
+  try { const rr = localStorage.getItem("cb_pending_rerun"); if (rr) rerun = JSON.parse(rr); } catch {}
+  localStorage.removeItem("cb_pending_rerun");
   const wfSel = pendingWf || (wfs.workflows[0] && wfs.workflows[0].id) || "";
 
   view.innerHTML = `
@@ -1593,19 +1943,38 @@ async function renderBench() {
           <button class="btn small" id="r-none">Clear</button>
           <span class="muted small">or pick from the Models page</span>
         </div>
+        <div class="chips" id="r-chips"></div>
         <div style="max-height:56vh;overflow:auto;border:1px solid var(--border);border-radius:var(--radius-s)" id="r-list"></div>
       </div>
     </div>
     </div>
     <div id="bench-lora-tab" class="${tab === "lora" ? "" : "hidden"}">
     <div class="muted small mb">Sweep one LoRA across strength values on a single base model — same seed for every step.</div>
-    <div style="max-width:920px">
+    <div>
       <div class="card">
         <label class="field"><span class="lab">LoRA workflow</span>
           <select id="lb-wf"></select>
           <div id="lb-wf-hint" class="mt small muted"></div></label>
-        <label class="field"><span class="lab">Base model</span>
-          <select id="lb-base"></select></label>
+        <label class="field"><span class="lab">Base model <span class="faint">— pick a folder, then a model</span></span>
+          <div class="grid2" style="gap:12px">
+            <div class="tree" id="lb-base-tree" style="max-height:38vh;overflow:auto;border:1px solid var(--border);border-radius:6px"><span class="spin2"></span>&nbsp; loading…</div>
+            <div>
+              <div class="row" style="margin-bottom:6px;gap:8px"><input class="search" id="lb-base-q" placeholder="filter…" style="max-width:180px">
+              <select id="lb-base-sort" style="width:auto">
+                <option value="name">Sort: name</option>
+                <option value="display">Sort: display name</option>
+                <option value="stars">Sort: stars</option>
+                <option value="date">Sort: newest</option>
+                <option value="size">Sort: size</option>
+              </select></div>
+              <div style="max-height:38vh;overflow:auto;border:1px solid var(--border);border-radius:6px;background:var(--bg2)" id="lb-base-list"></div>
+              <span class="muted small" id="lb-base-cnt"></span>
+              <div class="row mt" id="lb-base-more"></div>
+            </div>
+          </div>
+          <div class="chips" id="lb-base-chips"></div>
+          <input type="hidden" id="lb-base">
+        </label>
         <div class="field"><span class="lab">LoRA <span class="faint">(pick a folder, then a LoRA)</span></span>
           <div class="grid2" style="gap:12px">
             <div class="tree" id="lb-ltree" style="max-height:38vh;overflow:auto;border:1px solid var(--border);border-radius:6px"><span class="spin2"></span>&nbsp; loading…</div>
@@ -1624,6 +1993,7 @@ async function renderBench() {
             </div>
           </div>
           <input type="hidden" id="lb-lora"></div>
+        <div class="chips" id="lb-chips"></div>
         <div class="grid2" style="gap:12px">
           <label class="field"><span class="lab">Strength min</span>
             <input id="lb-min" type="number" step="0.01" min="-100" max="100" value="0.0"></label>
@@ -1643,6 +2013,16 @@ async function renderBench() {
       </div>
     </div>
     </div>`;
+
+  // ---- hover preview: show each model/LoRA's preview thumb near the cursor.
+  //      One shared box + delegated listeners on the persistent containers, so
+  //      it survives innerHTML re-renders and never steals row click handlers. ----
+  attachHoverPreview(document.getElementById("r-list"),
+    (k) => models.models.find(x => x.key === k));
+  attachHoverPreview(document.getElementById("lb-base-list"),
+    (k) => lbBase.models.find(x => x.key === k));
+  attachHoverPreview(document.getElementById("lb-lora-list"),
+    (k) => lbLora.loras.find(x => x.key === k));
 
   // ---- prompt-target node picker ----
   const pnodeSel = document.getElementById("r-pnode");
@@ -1684,14 +2064,42 @@ async function renderBench() {
   };
   const renderList = (filter="") => {
     const rows = filteredRows(filter);
-    rList.innerHTML = rows.map(m => `<label class="row" style="padding:6px 10px;border-bottom:1px solid var(--border)">
+    rList.innerHTML = rows.map(m => `<label class="row" data-key="${esc(m.key)}" style="padding:6px 10px;border-bottom:1px solid var(--border)">
       <input type="checkbox" value="${esc(m.key)}" ${set.has(m.key)?"checked":""} style="width:auto">
       <span class="grow" style="font-size:13px">${esc(m.display_name||m.name)} <span class="faint small">· ${esc(m.folder||"/")}</span></span>
     </label>`).join("") || `<div class="empty">none</div>`;
     document.getElementById("r-cnt").textContent = `${set.size} selected`;
+    renderModelChips();
     rList.querySelectorAll("input[type=checkbox]").forEach(c => c.onchange = () => {
       if (c.checked) set.add(c.value); else set.delete(c.value);
       document.getElementById("r-cnt").textContent = `${set.size} selected`;
+      renderModelChips();
+    });
+  };
+  // Selected-model chips — a live summary of the selection, independent of the
+  // list filter (a filtered-out model stays selected & visible as a chip).
+  const renderModelChips = () => {
+    const box = document.getElementById("r-chips");
+    if (!box) return;
+    const byKey = new Map(models.models.map(m => [m.key, m]));
+    const keys = [...set];
+    if (!keys.length) { box.innerHTML = `<span class="chips-empty">No models selected yet — check the list below.</span>`; return; }
+    box.innerHTML = keys.map(k => {
+      const m = byKey.get(k) || {};
+      const label = m.display_name || m.name || k.split("/").pop() || k;
+      return `<span class="chip" data-key="${esc(k)}" title="${esc(k)}">
+        <span class="chip-label">${esc(label)}</span>
+        <button class="chip-x" data-x="${esc(k)}" title="Remove" aria-label="Remove ${esc(label)}">×</button>
+      </span>`;
+    }).join("");
+    box.querySelectorAll(".chip-x").forEach(b => b.onclick = () => {
+      const k = b.dataset.x;
+      set.delete(k);
+      const cb = rList.querySelector(`input[value="${CSS.escape(k)}"]`);
+      if (cb) cb.checked = false;
+      document.getElementById("r-cnt").textContent = `${set.size} selected`;
+      renderModelChips();
+      showWarn();
     });
   };
   document.getElementById("r-q").oninput = e => renderList(e.target.value);
@@ -1714,6 +2122,29 @@ async function renderBench() {
   };
   document.getElementById("r-wf").onchange = () => { renderPnode(); showWarn(); };
   showWarn();
+
+  // ---- Rerun prefill (model tab): restore this bench's workflow, seed,
+  //      prompt, prompt node, and the originally selected models. ----
+  if (rerun && rerun.kind === "model") {
+    if (rerun.workflow_id) {
+      const wf = document.getElementById("r-wf");
+      if ([...wf.options].some(o => o.value === rerun.workflow_id)) {
+        wf.value = rerun.workflow_id;
+        renderPnode(); // rebuild the prompt-node options for this workflow
+        showWarn();
+      }
+    }
+    if (rerun.seed != null) document.getElementById("r-seed").value = rerun.seed;
+    if (rerun.prompt) document.getElementById("r-prompt").value = rerun.prompt;
+    if (rerun.prompt_node_id) {
+      const pn = document.getElementById("r-pnode");
+      if ([...pn.options].some(o => o.value === String(rerun.prompt_node_id))) pn.value = String(rerun.prompt_node_id);
+    }
+    if (Array.isArray(rerun.model_keys)) {
+      rerun.model_keys.forEach(k => { if (models.models.some(m => m.key === k)) set.add(k); });
+      renderList();
+    }
+  }
 
   document.getElementById("r-start").onclick = async () => {
     if (!set.size) { toast("Select at least one model"); return; }
@@ -1756,27 +2187,42 @@ async function renderBench() {
     document.getElementById("lb-wf-hint").innerHTML =
       `No standard-LoraLoader workflow — the lora strength bench needs a workflow with a single <code>LoraLoader</code> node. See the <a href="#/workflows?kind=lora">Workflows</a> page (LoRAs tab) for LoRA-tagged workflows.`;
   }
-  const lbBase = document.getElementById("lb-base");
-  lbBase.innerHTML = models.models.map(m =>
-    `<option value="${esc(m.key)}">${esc(m.display_name || m.name)}</option>`).join("");
-  // Pre-select the configured default base model (Set → Setup page), if it
-  // exists among the options. One-shot at tab build — user can still change.
+  const lbBaseInput = document.getElementById("lb-base");
+  // Base-model picker: folder tree + server-filtered chunked list, mirroring
+  // the LoRA picker (same box size, same chip pattern). The hidden #lb-base
+  // input holds the selected key so updateLbPreview / the lb-start body keep
+  // reading it unchanged.
   const loraBaseDefault = (cfg && cfg.lora_bench_default_model) || "";
-  if (loraBaseDefault && [...lbBase.options].some(o => o.value === loraBaseDefault)) {
-    lbBase.value = loraBaseDefault;
+  if (loraBaseDefault) {
+    lbBase.selected = loraBaseDefault;
+    lbBaseInput.value = loraBaseDefault;
   }
   // LoRA picker: folder tree (left) + server-filtered chunked list (right).
   // The hidden #lb-lora input holds the selected key so updateLbPreview /
   // the lb-start submit body keep reading it unchanged. (Named lbLoraInput
   // to avoid shadowing the module-level lbLora *state* object.)
   const lbLoraInput = document.getElementById("lb-lora");
-  loadLbLoraTree().then(() => lbApplyPendingLora(pendingLora));
+  // A rerun of a LoRA bench also carries its LoRA key — apply whichever is set.
+  const applyLoraKey = pendingLora
+    || (rerun && rerun.kind === "lora" ? rerun.lora_key : null);
+  loadLbLoraTree().then(() => lbApplyPendingLora(applyLoraKey));
   bindLbLoraFilter();
   const lbSort = document.getElementById("lb-lora-sort");
   if (lbSort) {
     lbSort.value = lbLora.sort || "name";
     lbSort.onchange = (e) => { lbLora.sort = e.target.value; loadLbLoras(); };
   }
+
+  // Base-model picker: folder tree + server-filtered chunked list, mirroring
+  // the LoRA picker. Same box size, same chip pattern.
+  const baseSort = document.getElementById("lb-base-sort");
+  if (baseSort) {
+    baseSort.value = lbBase.sort || "name";
+    baseSort.onchange = (e) => { lbBase.sort = e.target.value; loadLbBaseModels(); };
+  }
+  bindLbBaseFilter();
+  const lbBaseReady = lbBaseLoadTree();
+  renderLbBaseChips();
 
   // Step preview — SAME clamp rule as the backend: steps = min, min+inc, …
   // up to max, final step clamped to max (so the last value == max);
@@ -1807,13 +2253,36 @@ async function renderBench() {
     }
     const steps = computeSteps(min, max, inc);
     pv.style.color = "";
-    start.disabled = !lbWf.value || !lbBase.value || !lbLoraInput.value;
+    start.disabled = !lbWf.value || !lbBaseInput.value || !lbLoraInput.value;
     pv.textContent = `${steps.length} steps → ${steps.length} images: ${steps.map(fmtStep).join(", ")}`;
     return steps;
   };
   ["lb-min", "lb-max", "lb-inc"].forEach(id => document.getElementById(id).addEventListener("input", updateLbPreview));
-  [lbWf, lbBase, lbLoraInput].forEach(sel => sel.addEventListener("change", updateLbPreview));
+  [lbWf, lbBaseInput, lbLoraInput].forEach(sel => sel.addEventListener("change", updateLbPreview));
   updateLbPreview();
+
+  // ---- Rerun prefill (LoRA tab): restore the run's workflow, base model,
+  //      strength range, increment, seed and prompt. ----
+  if (rerun && rerun.kind === "lora") {
+    if (rerun.workflow_id) {
+      if ([...lbWf.options].some(o => o.value === rerun.workflow_id)) lbWf.value = rerun.workflow_id;
+    }
+    if (rerun.base_model_key) {
+      lbBase.selected = rerun.base_model_key;
+      lbBaseInput.value = rerun.base_model_key;
+    }
+    if (rerun.strength_min != null) document.getElementById("lb-min").value = rerun.strength_min;
+    if (rerun.strength_max != null) document.getElementById("lb-max").value = rerun.strength_max;
+    // Increment isn't stored on the record; derive it from the step ladder
+    // (uniform steps) when possible, otherwise leave the 0.1 default.
+    if (Array.isArray(rerun.strengths) && rerun.strengths.length >= 2) {
+      const inc = parseFloat((rerun.strengths[1] - rerun.strengths[0]).toFixed(4));
+      if (isFinite(inc) && inc > 0) document.getElementById("lb-inc").value = inc;
+    }
+    if (rerun.seed != null) document.getElementById("lb-seed").value = rerun.seed;
+    if (rerun.prompt) document.getElementById("lb-prompt").value = rerun.prompt;
+    updateLbPreview(); // recompute the step preview from the restored range
+  }
 
   document.getElementById("lb-start").onclick = async () => {
     const min = parseFloat(document.getElementById("lb-min").value);
@@ -1823,7 +2292,7 @@ async function renderBench() {
     if (!lbWf.value) { toast("No LoRA workflow available — upload one first"); return; }
     const body = {
       workflow_id: lbWf.value,
-      base_model_key: lbBase.value,
+      base_model_key: lbBaseInput.value,
       lora_key: lbLoraInput.value,
       strength_min: min,
       strength_max: max,
@@ -1837,7 +2306,9 @@ async function renderBench() {
         ? `Queued LoRA sweep (${r.bench.total} steps) — will start when the current bench finishes`
         : `Started LoRA sweep (${r.bench.total} steps)`);
       refreshIndicator();
-      location.hash = "#/outputs?kind=lora";
+      // Land on the home page (bench history), matching the model bench —
+      // not the outputs page. The new run appears there with its progress.
+      location.hash = "#/home";
     } catch (e) {
       // 400/404 -> the ApiError message carries the backend `detail`
       toast(e.message);

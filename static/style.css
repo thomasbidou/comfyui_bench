@@ -50,13 +50,16 @@ button{font:inherit;color:inherit;cursor:pointer}
 @keyframes sp{to{transform:rotate(360deg)}}
 
 .main{flex:1;padding:18px;max-width:1500px;width:100%;margin:0 auto}
-.grid2{display:grid;grid-template-columns:300px 1fr;gap:16px}
+.grid2{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px}
+/* grid items in the 1fr track must be able to shrink (min-width:auto would
+   force the column to the widest untruncated child and overflow the box) */
+.grid2>*{min-width:0}
 @media(max-width:880px){.grid2{grid-template-columns:1fr}}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
 .muted{color:var(--dim)} .faint{color:var(--faint)} .small{font-size:12.5px}
-.row{display:flex;align-items:center;gap:10px} .space{justify-content:space-between}
+.row{display:flex;align-items:center;gap:10px;min-width:0} .space{justify-content:space-between}
 .row.sel{background:rgba(137,180,250,.14);color:var(--acc)}
-.wrap{flex-wrap:wrap} .grow{flex:1} .mt{margin-top:12px} .mb{margin-bottom:12px}
+.wrap{flex-wrap:wrap} .grow{flex:1;min-width:0} .mt{margin-top:12px} .mb{margin-bottom:12px}
 .hidden{display:none!important}
 .badge{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600}
 .badge.ok{background:rgba(166,227,161,.15);color:var(--ok)}
@@ -131,14 +134,22 @@ label.field .lab{font-size:12.5px;color:var(--dim);font-weight:600;margin-bottom
 #l-more-row .btn:hover{border-color:var(--acc);color:var(--acc)}
 
 /* ---- bench rows ---- */
+.benchwrap{margin-bottom:10px}
 .benchrow{display:flex;align-items:center;gap:14px;padding:13px 14px;border:1px solid var(--border);
-  border-radius:var(--radius);margin-bottom:10px;background:var(--panel);cursor:pointer;transition:.12s}
+  border-radius:var(--radius);background:var(--panel);cursor:pointer;transition:.12s;flex-wrap:wrap}
 .benchrow:hover{border-color:var(--border2)}
 .benchrow .title{font-weight:600}
 .benchrow .sub{font-size:12.5px;color:var(--faint)}
 .progressbar{height:8px;background:var(--bg3);border-radius:5px;overflow:hidden;flex:1;min-width:120px}
 .progressbar>div{height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2));width:0;transition:width .4s}
 .benchrow .pct{font-variant-numeric:tabular-nums;font-weight:700;min-width:56px;text-align:right}
+.benchrow [data-act=settings],.benchrow [data-act=rerun]{cursor:pointer}
+.benchrow .caret{display:inline-block;transition:transform .15s}
+.benchsettings{border:1px solid var(--border);border-top:none;border-radius:0 0 var(--radius) var(--radius);
+  background:var(--bg2);padding:12px 16px}
+.benchsettings .kv{grid-template-columns:170px 1fr}
+.benchwrap.open .benchrow{border-radius:var(--radius) var(--radius) 0 0;border-bottom:none}
+.benchwrap.open .caret{transform:rotate(180deg)}
 
 /* ---- outputs / compare ---- */
 .ogrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
@@ -184,6 +195,18 @@ label.field .lab{font-size:12.5px;color:var(--dim);font-weight:600;margin-bottom
 .token-box{font-family:ui-monospace,Menlo,Consolas,monospace;background:var(--bg2);border:1px dashed var(--border2);
   padding:10px 12px;border-radius:var(--radius-s);word-break:break-all;user-select:all}
 .pill{display:inline-block;padding:2px 8px;background:var(--bg3);border-radius:6px;font-size:11.5px;color:var(--dim);margin:2px 3px 2px 0;font-family:ui-monospace,monospace}
+/* Selected-model / LoRA chips on the Run-bench page (in addition to the list) */
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.chips:empty{display:none}
+.chip{display:inline-flex;align-items:center;gap:6px;max-width:260px;padding:4px 6px 4px 10px;
+  background:var(--bg3);border:1px solid var(--border2);border-radius:16px;font-size:12.5px;color:var(--text);
+  animation:chip-in .15s ease}
+.chip .chip-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip .chip-x{cursor:pointer;width:18px;height:18px;border-radius:50%;border:0;background:transparent;
+  color:var(--dim);font-size:14px;line-height:1;display:grid;place-items:center;padding:0;flex:none}
+.chip .chip-x:hover{background:var(--border2);color:var(--text)}
+@keyframes chip-in{from{opacity:0;transform:scale(.9)}to{opacity:1;transform:scale(1)}}
+.chips-empty{font-size:12px;color:var(--dim);padding:4px 2px}
 
 /* ---- full-window modal (compare + single-image viewer) ---- */
 .modal-back.full{padding:0;place-items:stretch;background:rgba(0,0,0,.82)}
@@ -239,3 +262,13 @@ label.field .lab{font-size:12.5px;color:var(--dim);font-weight:600;margin-bottom
 .nav-arrow:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 .modal.solo .nav-arrow{display:none}
 code{background:var(--bg2);padding:1px 5px;border-radius:4px;font-family:ui-monospace,monospace;font-size:12.5px}
+
+/* ---- hover preview box (Run-bench model/LoRA lists) ---- */
+.hoverthumb{position:fixed;left:0;top:0;z-index:300;display:none;pointer-events:none;
+  width:180px;padding:4px;background:var(--bg2);border:1px solid var(--border2);
+  border-radius:var(--radius);box-shadow:var(--shadow)}
+.hoverthumb .thumb{aspect-ratio:1/1;width:100%;height:100%;object-fit:cover;
+  background:var(--bg2);display:block;border-radius:calc(var(--radius) - 4px)}
+.hoverthumb .thumb.placeholder{display:grid;place-items:center;color:var(--faint);
+  font-size:11px;background:repeating-linear-gradient(45deg,var(--bg2),var(--bg2) 10px,
+  var(--bg3) 10px,var(--bg3) 20px)}
