@@ -27,8 +27,14 @@ frontend.
   Civitai metadata (author / likes / downloads), and your own **star rating +
   notes**. Search, sort, and a **⟳ refresh** button to re-scan.
 - **Run bench** — pick a workflow + any set of models + an optional prompt and
-  a **fixed seed** (for fair comparisons). The bench runs **in the background**;
-  a live `xx/yy` counter shows how many are done.
+  a **fixed seed** (for fair comparisons). The model list has a **search box**
+  (matches name, display name, folder, base model), a **sort** dropdown
+  (name / display name / stars / newest / size), and a **min-stars filter**
+  (any / ≥1 / ≥3 / ≥4 / ≥5); each row shows its ★ rating and size. The
+  **selection survives filtering** — hidden-but-checked models stay selected
+  (visible as chips) and are still part of the bench — and **Select all**
+  picks only the currently-filtered models. The bench runs **in the
+  background**; a live `xx/yy` counter shows how many are done.
 - **Run queue** — benches are **serialized**: only one runs at a time. Start
   another bench while one is in flight and it simply **lines up** (shown as
   `queued · #n`) and starts automatically in order when the current one

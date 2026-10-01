@@ -1935,8 +1935,24 @@ async function renderBench() {
       <div class="card">
         <div class="row space mb wrap">
           <h2 style="margin:0">Models</h2>
-          <div class="row"><input class="search" id="r-q" placeholder="filter…" style="max-width:180px">
-          <span class="muted small" id="r-cnt"></span></div>
+          <div class="row wrap" style="gap:8px">
+            <input class="search" id="r-q" placeholder="filter by name, folder, base…" style="max-width:240px">
+            <select id="r-sort" style="width:auto">
+              <option value="name">Sort: name</option>
+              <option value="display">Sort: display name</option>
+              <option value="stars">Sort: stars</option>
+              <option value="date">Sort: newest</option>
+              <option value="size">Sort: size</option>
+            </select>
+            <select id="r-star" style="width:auto">
+              <option value="0">Stars: any</option>
+              <option value="1">Stars: ≥ 1</option>
+              <option value="3">Stars: ≥ 3</option>
+              <option value="4">Stars: ≥ 4</option>
+              <option value="5">Stars: ≥ 5</option>
+            </select>
+            <span class="muted small" id="r-cnt"></span>
+          </div>
         </div>
         <div class="row wrap mb">
           <button class="btn small" id="r-all">Select all</button>
@@ -2058,21 +2074,41 @@ async function renderBench() {
   // ---- model list ----
   const rList = document.getElementById("r-list");
   const set = new Set(pendingModels);
-  const filteredRows = (filter="") => {
-    const q = (filter||"").toLowerCase();
-    return models.models.filter(m => !q || m.name.toLowerCase().includes(q) || (m.display_name||"").toLowerCase().includes(q));
+  const rModel = { q: "", sort: "name", starMin: 0 };
+  // NOTE: Array.prototype.sort takes a COMPARATOR (a,b)=>number, not a key
+  // function — a `m => key` passed here is undefined-behavior (only reads the
+  // first arg). Each entry below is a real two-arg comparator.
+  const sorters = {
+    name:    (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
+    display: (a, b) => (a.display_name || "").toLowerCase().localeCompare((b.display_name || "").toLowerCase()),
+    stars:   (a, b) => (b.stars || 0) - (a.stars || 0),
+    size:    (a, b) => (b.size || 0) - (a.size || 0),
+    date:    (a, b) => (b.modified || 0) - (a.modified || 0),
   };
-  const renderList = (filter="") => {
-    const rows = filteredRows(filter);
+  const deriveList = () => {
+    const q = rModel.q.trim().toLowerCase();
+    const rows = models.models.filter(m => {
+      if (q) {
+        const hay = [m.name, m.display_name, m.folder, m.base_model].filter(Boolean).join(" ").toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      if (rModel.starMin > 0 && !(m.stars >= rModel.starMin)) return false;
+      return true;
+    });
+    rows.sort(sorters[rModel.sort] || sorters.name);
+    return rows;
+  };
+  const renderList = () => {
+    const rows = deriveList();
     rList.innerHTML = rows.map(m => `<label class="row" data-key="${esc(m.key)}" style="padding:6px 10px;border-bottom:1px solid var(--border)">
       <input type="checkbox" value="${esc(m.key)}" ${set.has(m.key)?"checked":""} style="width:auto">
-      <span class="grow" style="font-size:13px">${esc(m.display_name||m.name)} <span class="faint small">· ${esc(m.folder||"/")}</span></span>
-    </label>`).join("") || `<div class="empty">none</div>`;
-    document.getElementById("r-cnt").textContent = `${set.size} selected`;
+      <span class="grow" style="font-size:13px">${m.stars ? `<span style="color:#e6b422;font-size:12px;white-space:nowrap">${stars(m.stars)}</span>&nbsp;` : ""}${esc(m.display_name||m.name)} <span class="faint small">· ${esc(m.folder||"/")} · ${fmtBytes(m.size)}</span></span>
+    </label>`).join("") || `<div class="empty">no models match your filters</div>`;
+    document.getElementById("r-cnt").textContent = `${set.size} selected · ${rows.length} shown`;
     renderModelChips();
     rList.querySelectorAll("input[type=checkbox]").forEach(c => c.onchange = () => {
       if (c.checked) set.add(c.value); else set.delete(c.value);
-      document.getElementById("r-cnt").textContent = `${set.size} selected`;
+      document.getElementById("r-cnt").textContent = `${set.size} selected · ${rows.length} shown`;
       renderModelChips();
     });
   };
@@ -2102,9 +2138,11 @@ async function renderBench() {
       showWarn();
     });
   };
-  document.getElementById("r-q").oninput = e => renderList(e.target.value);
-  document.getElementById("r-all").onclick = () => { filteredRows(document.getElementById("r-q").value).forEach(m => set.add(m.key)); renderList(document.getElementById("r-q").value); };
-  document.getElementById("r-none").onclick = () => { set.clear(); renderList(document.getElementById("r-q").value); };
+  document.getElementById("r-q").oninput = e => { rModel.q = e.target.value; renderList(); };
+  document.getElementById("r-sort").onchange = e => { rModel.sort = e.target.value; renderList(); };
+  document.getElementById("r-star").onchange = e => { rModel.starMin = parseInt(e.target.value) || 0; renderList(); };
+  document.getElementById("r-all").onclick = () => { deriveList().forEach(m => set.add(m.key)); renderList(); };
+  document.getElementById("r-none").onclick = () => { set.clear(); renderList(); };
   renderList();
 
   // ---- loader-type warning ----
