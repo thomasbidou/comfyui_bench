@@ -23,11 +23,15 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import signal
+import subprocess
 import threading
+import time
 from typing import Optional
 
 from fastapi import (FastAPI, Request, Response, WebSocket,
-                     WebSocketDisconnect, HTTPException, Query)
+                     WebSocketDisconnect, HTTPException, Query, BackgroundTasks)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -1036,6 +1040,92 @@ def api_config_test(request: Request):
     return {"ok": alive, "base": base,
             "device": (stats or {}).get("devices"),
             "system": (stats or {}).get("system")}
+
+
+# ---------------------------------------------------------------------------
+# Admin: restart the service (works under systemd or a manual uvicorn run)
+# ---------------------------------------------------------------------------
+def _under_systemd(unit: str = "comfyui-bench") -> bool:
+    """True if WE are the main PID systemd is tracking for this unit.
+
+    Self-detecting: compares `systemctl --user show <unit> -p MainPID` to our
+    own PID. If the app was launched by hand (no service / different PID), this
+    returns False and the re-exec fallback in `_restart_fallback` is used.
+    """
+    if not shutil.which("systemctl"):
+        return False
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", "show", unit, "-p", "MainPID", "--value"],
+            capture_output=True, text=True, timeout=3, check=False)
+        pid = out.stdout.strip()
+        return pid.isdigit() and int(pid) == os.getpid()
+    except Exception:
+        return False
+
+
+def _restart_fallback() -> None:
+    """Manual-run path: spawn a fresh uvicorn in a detached session, then exit.
+
+    Runs in a separate process/session so it survives our own death. A tiny
+    supervisor waits until the port STOPS ACCEPTING (old process gone) — up to
+    ~30s — then execv's a fresh uvicorn (avoids 'address already in use').
+    shell=False, no pipes.
+    """
+    root = os.path.dirname(os.path.abspath(__file__))
+    py = os.path.join(root, ".venv", "bin", "python")
+    uv = os.path.join(root, ".venv", "bin", "uvicorn")
+    host = str(config.get("host", "0.0.0.0"))
+    port = int(config.get("port", 7860))
+    # Supervisor: poll the port until it REFUSES (old instance gone), then
+    # replace ourselves with a fresh uvicorn. It MUST be a multi-line -c string
+    # — Python forbids a compound `try` on the same physical line as the `for:`
+    # header, so semicolons cannot collapse this into one line.
+    supervisor = (
+        "import socket, time, os\n"
+        "for _ in range(120):\n"
+        "    try:\n"
+        "        socket.create_connection(('127.0.0.1', %d), 0.2).close()\n"
+        "    except Exception:\n"
+        "        break\n"
+        "    else:\n"
+        "        time.sleep(0.25)\n"
+        "os.execv(%r, [%r, 'server:app', '--host', %r, '--port', str(%d)])"
+    ) % (port, uv, uv, host, port)
+    subprocess.Popen(
+        [py, "-c", supervisor],
+        cwd=root, start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, close_fds=True)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _do_restart() -> str:
+    """Kick off the restart (fire-and-forget). Returns the path taken."""
+    if _under_systemd():
+        subprocess.Popen(
+            ["systemctl", "--user", "restart", "comfyui-bench"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+            close_fds=True)
+        return "systemd"
+    # Not under systemd (manual uvicorn / python server.py): re-exec fallback.
+    _restart_fallback()
+    return "re-exec"
+
+
+@app.post("/api/admin/restart")
+async def api_admin_restart(request: Request,
+                            background: BackgroundTasks):
+    require_auth(request)
+    # Defer the kill until AFTER the 202 is on the wire: Starlette runs
+    # background tasks only after the response body has been sent. The 0.3s
+    # sleep additionally guarantees the bytes reached the client.
+    def _job():
+        time.sleep(0.3)
+        _do_restart()
+    background.add_task(_job)
+    return JSONResponse({"ok": True, "restarting": True}, status_code=202)
 
 
 # ---------------------------------------------------------------------------

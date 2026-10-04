@@ -2688,6 +2688,12 @@ async function renderSetup() {
           <div class="row mt"><button class="btn" id="s-copy">Copy</button>
             <button class="btn danger" id="s-regen">Regenerate token</button></div>
         </div>
+        <div class="mt" style="border-top:1px solid var(--border);padding-top:14px">
+          <h3>Service</h3>
+          <p class="muted small">Restart the app process. In-flight bench jobs are aborted.</p>
+          <div class="row mt"><button class="btn danger" id="s-restart">Restart app</button></div>
+          <div id="s-restartout" class="mt small"></div>
+        </div>
       </div>
     </div>`;
   const tok = await getToken();
@@ -2730,6 +2736,35 @@ async function renderSetup() {
     try { const r = await API.post("/config/regenerate-token");
       document.getElementById("s-token").textContent = r.token; toast("New token generated"); }
     catch(e){toast(e.message);}
+  };
+  document.getElementById("s-restart").onclick = async () => {
+    if (!confirm("Restart the app? Any in-progress bench jobs will be aborted.")) return;
+    const btn  = document.getElementById("s-restart");
+    const out  = document.getElementById("s-restartout");
+    btn.disabled = true;
+    out.innerHTML = `<span class="badge run">restarting…</span>`;
+
+    // Fire the restart. The server dies mid-request, so a network error here
+    // is EXPECTED — do not treat it as a failure.
+    try { await fetch("/api/admin/restart", { method: "POST" }); } catch {}
+
+    // Give the process a beat to go down, then poll the OPEN liveness probe
+    // (GET /api/auth returns 200 whenever the server is up; no token needed).
+    await new Promise(r => setTimeout(r, 1500));
+    const deadline = Date.now() + 30000;
+    let up = false;
+    while (Date.now() < deadline) {
+      try { const r = await fetch("/api/auth"); if (r.ok) { up = true; break; } } catch {}
+      await new Promise(r => setTimeout(r, 800));
+    }
+
+    if (up) {
+      out.innerHTML = `<span class="badge ok">back online</span>`;
+      setTimeout(() => location.reload(), 600);
+    } else {
+      out.innerHTML = `<span class="badge err">still down — refresh the page when it's back</span>`;
+      btn.disabled = false;
+    }
   };
   document.getElementById("s-test").onclick = async () => {
     await saveSetup();

@@ -130,7 +130,12 @@ frontend.
   names, and **sort** by date / name / status.
 - **Setup page** — ComfyUI URL, model roots, LoRA roots, output root, default
   seed, **default base model for the LoRA bench**, dark/light theme, and the
-  access token (copy / regenerate).
+  access token (copy / regenerate). A **Service** block offers a red
+  **Restart app** button: after a confirmation dialog it calls
+  `POST /api/admin/restart` (token-gated like every other route), which
+  restarts the service (`systemctl --user restart comfyui-bench` under
+  systemd, or a re-exec fallback when running a bare `uvicorn`) — the UI
+  shows *restarting…* → *back online* and reloads automatically.
 - **Dark mode** — on by default, toggleable, remembered per browser.
 - **Token auth** — a single access token gates the UI so it's safe to expose on
   a trusted LAN.
