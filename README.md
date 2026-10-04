@@ -45,6 +45,32 @@ frontend.
   the whole bench**: it's marked `error`/`timeout` and the run moves on to the
   next model. A **stall guard** detects a prompt stuck in ComfyUI's queue and
   fails that model early instead of waiting out the full per-model timeout.
+- **Error visibility** — every failure is **captured, stored, and visible in
+  the UI and the logs**, not just silently skipped:
+  - **Statuses**: `queue_error` (ComfyUI rejected the prompt at submission —
+    e.g. a missing LoRA/ckpt, a broken node — or the server was unreachable),
+    `error` (a node crashed during execution), `timeout` (no completion in
+    time, or the prompt was dropped from ComfyUI's queue), `no_output`
+    (ComfyUI reported success but no usable image was produced), `cancelled`
+    (you stopped the bench). All of them count toward the `xx/yy` progress.
+  - **Human-readable messages**: at the point of failure the app extracts a
+    clean summary from ComfyUI's structured error — e.g.
+    `Node 57: loras — Missing LoRA(s) in local library: BBetter_Details_v6.0`,
+    `KSampler (node 52): <exception>`, `Cannot reach ComfyUI: <reason>`,
+    `Timed out after 900 s` — stored as `error_human` (with the raw error kept
+    as `error`) so you see *why* it failed, not a truncated JSON dump.
+  - **Home badge**: a finished bench shows **`failed · N`** (red, nothing
+    succeeded) or **`partial · N failed`** (orange, mixed) instead of a
+    misleading green `finished`; all-success keeps `finished`.
+  - **Per-model results**: the Home row's expandable **settings panel** lists
+    every model / LoRA strength step with its status badge and — on failure —
+    the human-readable error line.
+  - **Outputs page**: when you open a bench's outputs and it has failures, a
+    **✗ N of M step(s) failed** panel lists each failed step with its error
+    (replacing the generic "No outputs yet" message when the grid is empty).
+  - **Logs**: every failure is a `warning` line in
+    `journalctl --user -u comfyui-bench`, plus bench start/end info lines —
+    the operator's view without opening the UI.
 - **Outputs** — browse generated images by bench, **Select all** (visible even
   with nothing selected; selects the currently-filtered results), then
   **compare**: exactly 2 → a drag **slider** (full image, letterboxed — no
@@ -214,6 +240,14 @@ uvicorn server:app --host 0.0.0.0 --port 7860
    `xx/yy` counter and per-model status update live.
 4. When ComfyUI reports `execution_success`, the produced image is captured
    from `/history` and stored under the bench in `outputs.json`.
+5. When a model **fails**, the run marks it with a precise terminal status —
+   `queue_error` (rejected at submission / ComfyUI unreachable), `error` (node
+   crashed), `timeout` (no completion / dropped from queue), or `no_output`
+   (success but no image) — stores a **human-readable** `error_human` message
+   (e.g. `Node 57: Missing LoRA(s) in local library: <name>`), logs a `warning`
+   to `journalctl`, and moves on to the next model. The home badge then shows
+   `failed · N` / `partial · N failed` instead of a misleading `finished`, and
+   the settings panel + outputs page list each failure with its reason.
 
 Because the seed is fixed and the workflow is identical across models, the only
 variable is the model — which is exactly what you want when comparing them.

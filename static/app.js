@@ -573,6 +573,61 @@ function toggleBenchSettings(row) {
   panel.classList.toggle("hidden", !open);
   if (bid) { if (open) expandedBenches.add(bid); else expandedBenches.delete(bid); }
 }
+// ---- error/visibility helpers (added) ------------------------------------
+const FAILED_STATUSES = new Set(["error", "queue_error", "timeout", "no_output"]);
+function benchState(b) {
+  const st = (b && b.status) || "";
+  if (st !== "finished") return null;
+  return (b.results && typeof b.results === "object") ? b.results : {};
+}
+function failedItems(b) {
+  const rs = benchState(b);
+  if (!rs) return [];
+  return Object.keys(rs).map(k => ({ key: k, r: rs[k] }))
+    .filter(x => FAILED_STATUSES.has(x.r.status));
+}
+function benchBadge(b) {
+  if (b.active) return `<span class="badge run"><span class="spin2"></span> running</span>`;
+  if (b.queued || b.status === "queued") {
+    const pos = (typeof b.queue_position === "number") ? (b.queue_position + 1) : null;
+    return `<span class="badge wait"><span class="spin2"></span> queued${pos ? ` · #${pos}` : ""}</span>`;
+  }
+  if (b.status === "finished") {
+    const rs = (b.results && typeof b.results === "object") ? b.results : {};
+    const keys = Object.keys(rs);
+    const nFail = keys.filter(k => FAILED_STATUSES.has((rs[k] || {}).status)).length;
+    const nSucc = keys.filter(k => (rs[k] || {}).status === "success").length;
+    const nTerm = keys.length;
+    if (nTerm === 0) return `<span class="badge ok">finished</span>`;
+    if (nFail === 0) return `<span class="badge ok">finished</span>`;
+    if (nSucc === 0) {
+      return `<span class="badge failed" title="All ${nFail} step(s) failed">failed · ${nFail}</span>`;
+    }
+    return `<span class="badge partial" title="${nSucc} ok · ${nFail} failed">partial · ${nFail} failed</span>`;
+  }
+  if (b.status === "error") return `<span class="badge err">error</span>`;
+  if (b.status === "stopped") return `<span class="badge mut">stopped</span>`;
+  if (b.status === "interrupted") return `<span class="badge wait">interrupted</span>`;
+  return `<span class="badge mut">${esc(b.status)}</span>`;
+}
+function stepDisplayName(key, b) {
+  // lora: "0.50×"; model: short basename (strip common weight extensions)
+  if ((b.kind || "model") === "lora") {
+    const m = /step_\d{3}_(\d+\.\d{4})$/.exec(String(key));
+    if (m) return Number(m[1]).toFixed(2) + "×";
+  }
+  const base = String(key).split("/").pop();
+  return base.replace(/\.(safetensors|ckpt|pt)$/i, "");
+}
+function statusBadge(status) {
+  if (status === "success") return `<span class="badge ok">ok</span>`;
+  if (FAILED_STATUSES.has(status)) return `<span class="badge failed">${esc(status)}</span>`;
+  if (status === "cancelled") return `<span class="badge mut">cancelled</span>`;
+  return `<span class="badge mut">${esc(status)}</span>`;
+}
+function errorLine(r) {
+  return (r && (r.error_human || r.error)) ? `<div class="errline">${esc(r.error_human || r.error)}</div>` : "";
+}
 function benchSettingsHTML(b, isLora) {
   const rows = [];
   const add = (k, v) => { if (v !== null && v !== undefined && v !== "") rows.push(`<span class="k">${k}</span><span class="v">${v}</span>`); };
@@ -592,21 +647,27 @@ function benchSettingsHTML(b, isLora) {
   add("Progress", `${b.done}/${b.total}`);
   add("Created", new Date(b.created*1000).toLocaleString());
   if (b.finished) add("Finished", new Date(b.finished*1000).toLocaleString());
-  return `<div class="kv">${rows.join("")}</div>`;
+  // per-model / per-step results (failures with their human-readable error)
+  const rs = (b.results && typeof b.results === "object") ? b.results : {};
+  const keys = Object.keys(rs);
+  let resultsHTML = "";
+  if (keys.length) {
+    const items = keys.map(k => {
+      const r = rs[k] || {};
+      const failed = FAILED_STATUSES.has(r.status);
+      return `<div class="resrow">
+        <span class="resname">${esc(stepDisplayName(k, b))}</span>
+        ${statusBadge(r.status)}
+        ${failed ? errorLine(r) : ""}
+      </div>`;
+    }).join("");
+    resultsHTML = `<div class="kvsec mt"><div class="kvsec-h">Results</div>${items}</div>`;
+  }
+  return `<div class="kv">${rows.join("")}</div>${resultsHTML}`;
 }
 function benchRow(b) {
   const pct = b.total ? Math.min(100, Math.round(100*b.done/b.total)) : 0;
-  let badge;
-  if (b.active) badge = `<span class="badge run"><span class="spin2"></span> running</span>`;
-  else if (b.queued || b.status === "queued") {
-    const pos = (typeof b.queue_position === "number") ? (b.queue_position + 1) : null;
-    badge = `<span class="badge wait"><span class="spin2"></span> queued${pos ? ` · #${pos}` : ""}</span>`;
-  }
-  else if (b.status === "finished") badge = `<span class="badge ok">finished</span>`;
-  else if (b.status === "error") badge = `<span class="badge err">error</span>`;
-  else if (b.status === "stopped") badge = `<span class="badge mut">stopped</span>`;
-  else if (b.status === "interrupted") badge = `<span class="badge wait">interrupted</span>`;
-  else badge = `<span class="badge mut">${esc(b.status)}</span>`;
+  let badge = benchBadge(b);
   const stopBtn = (b.active || b.queued)
     ? `<button class="btn small danger" data-act="stop" data-bid="${esc(b.id)}" title="Stop the run (aborts remaining models in ComfyUI)${b.queued ? ' (drop from queue)' : ''}">■ stop</button>`
     : "";
@@ -2447,6 +2508,25 @@ async function renderOutputs() {
   if (benchId) params.set("bench_id", benchId);
   const d = await API.get("/outputs?" + params.toString());
   const rows = (d.outputs || []).filter(o => (o.kind || "model") === kind);
+  // Fetch this bench once (only when bench-filtered) so we can surface failures
+  // even when the output grid is empty.
+  let bd = null;
+  if (benchId) { try { bd = await API.get("/benches/" + encodeURIComponent(benchId)); } catch (e) {} }
+  let failures = [];
+  if (bd && bd.results && typeof bd.results === "object") {
+    failures = Object.keys(bd.results).map(k => ({ key: k, r: bd.results[k] }))
+      .filter(x => FAILED_STATUSES.has((x.r || {}).status));
+  }
+  const failuresHTML = (benchId && failures.length)
+    ? `<div class="failures card mb">
+        <div class="failures-h">✗ ${failures.length} of ${bd.total} step(s) failed</div>
+        ${failures.map(f => `<div class="failrow">
+          <span class="failname">${esc(stepDisplayName(f.key, bd))}</span>
+          ${statusBadge(f.r.status)}
+          <span class="failmsg">${esc((f.r.error_human || f.r.error) || "")}</span>
+        </div>`).join("")}
+       </div>`
+    : "";
   view.innerHTML = `
     ${kindTabsHTML(kind)}
     <div class="row space wrap mb">
@@ -2464,6 +2544,7 @@ async function renderOutputs() {
         <button class="btn small" id="o-grid-dl" title="Télécharger la grille (JPEG)">⬇ Télécharger</button>` : ""}
       </div>
     </div>
+    ${failuresHTML}
     <div class="ogrid" id="o-grid"></div>`;
   bindKindTabs(kind, (k) => { location.hash = "#/outputs?kind=" + k; });
   const sel = document.getElementById("o-bench");
@@ -2508,8 +2589,12 @@ async function renderOutputs() {
   };
   const drawGrid = () => {
     const v = visible();
+    const emptyMsg = outState.q
+      ? "No outputs match your search."
+      : (failures.length ? "No successful outputs for this bench — see the failures above."
+                         : "No outputs yet. Run a bench first.");
     grid.innerHTML = v.map(cellHTML).join("") ||
-      `<div class="empty" style="grid-column:1/-1">${outState.q ? "No outputs match your search." : "No outputs yet. Run a bench first."}</div>`;
+      `<div class="empty" style="grid-column:1/-1">${emptyMsg}</div>`;
     grid.querySelectorAll(".ocell").forEach(c => c.onclick = () => {
       const id = c.dataset.oid;
       if (outSel.has(id)) outSel.delete(id);

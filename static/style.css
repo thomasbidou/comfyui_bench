@@ -69,6 +69,9 @@ button{font:inherit;color:inherit;cursor:pointer}
 .badge.mut{background:var(--bg3);color:var(--dim)}
 /* LoRA kind badge — distinct accent (teal) so sweeps read at a glance */
 .badge.lora{background:rgba(116,199,236,.16);color:var(--acc2)}
+/* terminal-result badges (added): partial = some failed, failed = all failed */
+.badge.partial{background:rgba(249,226,175,.15);color:var(--warn)}
+.badge.failed{background:rgba(243,139,168,.15);color:var(--err)}
 
 /* buttons */
 .btn{padding:8px 14px;border-radius:var(--radius-s);border:1px solid var(--border2);
@@ -279,3 +282,17 @@ code{background:var(--bg2);padding:1px 5px;border-radius:4px;font-family:ui-mono
 .hoverthumb .thumb.placeholder{display:grid;place-items:center;color:var(--faint);
   font-size:11px;background:repeating-linear-gradient(45deg,var(--bg2),var(--bg2) 10px,
   var(--bg3) 10px,var(--bg3) 20px)}
+
+/* per-model / per-step results section (settings panel) */
+.kvsec{border-top:1px solid var(--border);padding-top:10px}
+.kvsec-h{font-weight:650;margin-bottom:8px;color:var(--dim);text-transform:uppercase;font-size:11px;letter-spacing:.4px}
+.resrow{display:flex;align-items:center;gap:10px;padding:5px 0;flex-wrap:wrap}
+.resname{min-width:150px;font-weight:560;word-break:break-all}
+.errline{width:100%;color:var(--err);font-size:12.5px;padding-left:2px;word-break:break-word}
+
+/* outputs-page failures section (bench-filtered) */
+.failures{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px}
+.failures-h{font-weight:650;margin-bottom:10px;color:var(--err)}
+.failrow{display:flex;align-items:center;gap:10px;padding:5px 0;flex-wrap:wrap}
+.failname{min-width:150px;font-weight:560;word-break:break-all}
+.failmsg{flex:1;color:var(--err);font-size:12.5px;word-break:break-word}

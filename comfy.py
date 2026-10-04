@@ -68,7 +68,12 @@ class ComfyUI:
         code, body = http_json("POST", self.base + "/prompt", {"prompt": prompt}, timeout=60)
         if code == 200 and isinstance(body, dict):
             return {"ok": True, "prompt_id": body.get("prompt_id"), "number": body.get("number")}
-        return {"ok": False, "error": (body if isinstance(body, str) else str(body))[:500]}
+        error_str = (body if isinstance(body, str) else str(body))[:500]
+        # Also expose the STRUCTURED body (dict/list) so the caller can build a
+        # human-readable summary before it is stringified. Callers that only
+        # need r["error"] are unaffected.
+        error_body = body if isinstance(body, (dict, list)) else None
+        return {"ok": False, "error": error_str, "error_body": error_body}
 
     def history(self, prompt_id: str) -> Optional[dict]:
         code, body = http_json("GET", f"{self.base}/history/{prompt_id}", timeout=20)

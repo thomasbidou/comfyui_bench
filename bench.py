@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -203,9 +204,12 @@ class BenchStore:
             res = b["results"].setdefault(model_key, {})
             res.update(fields)
             res["updated"] = time.time()
-            b["done"] = sum(1 for r in b["results"].values()
-                            if r.get("status") in ("success", "error",
-                                                   "timeout", "cancelled"))
+            # All terminal statuses count as done: success, error, timeout,
+            # cancelled, no_output (NEW), AND queue_error (was missing before).
+            b["done"] = sum(
+                1 for r in b["results"].values()
+                if r.get("status") in ("success", "error", "timeout",
+                                      "cancelled", "no_output", "queue_error"))
             self._save_benches()
 
     def mark_bench(self, bench_id, status):
@@ -247,6 +251,73 @@ store = BenchStore()
 # state/benches.json[bid]["grid_image"] (a file path); never in outputs.json.
 # ---------------------------------------------------------------------------
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Human-readable error summaries (built at the point of failure, where the
+# structured ComfyUI data is still available — once stringified + truncated in
+# benches.json it is no longer parseable).
+# ---------------------------------------------------------------------------
+def _summarize_queue_error(body) -> Optional[str]:
+    """Turn a ComfyUI /prompt error body (dict or raw string) into a short
+    human-readable message. Returns None when nothing useful is present.
+    Never raises: falls back to a truncated raw string."""
+    if isinstance(body, dict):
+        parts = []
+        node_errors = body.get("node_errors") or {}
+        if isinstance(node_errors, dict) and node_errors:
+            for nid, info in node_errors.items():
+                if not isinstance(info, dict):
+                    continue
+                details = []
+                for e in (info.get("errors") or []):
+                    if isinstance(e, dict):
+                        d = e.get("details") or e.get("message")
+                        if d:
+                            details.append(str(d))
+                if details:
+                    parts.append("Node %s: %s" % (nid, "; ".join(details)))
+        if parts:
+            return " | ".join(parts)[:500]
+        top = body.get("error")
+        if isinstance(top, dict):
+            msg = top.get("message") or top.get("details")
+            if msg:
+                return str(msg)[:500]
+        return None
+    if isinstance(body, str):
+        low = body.lower()
+        if "urlopen error" in low or "connection refused" in low or "timed out" in low:
+            m = re.search(r"urlopen error\s+(.*?)(?:\s*>?\s*)$", body)
+            reason = m.group(1).strip().rstrip(">").strip() if m else \
+                (body.split("urlopen error", 1)[1].strip().rstrip(">").strip()
+                 if "urlopen error" in low else body.strip())
+            if reason:
+                return ("Cannot reach ComfyUI: %s" % reason)[:500]
+        return body[:500] or None
+    return None
+
+
+def _summarize_execution_error(obj) -> tuple:
+    """Return (human_message, node_id_or_None) for a ComfyUI execution_error
+    object (m[1] from history status.messages)."""
+    if not isinstance(obj, dict):
+        return (str(obj)[:500] if obj else None), None
+    msg = obj.get("exception_message") or obj.get("message") or str(obj)
+    node_type = obj.get("node_type")
+    node_id = obj.get("node_id")
+    if node_type:
+        human = "%s%s: %s" % (
+            node_type,
+            (" (node %s)" % node_id) if node_id is not None else "",
+            msg)
+    else:
+        human = str(msg)
+    try:
+        node_id_i = int(node_id) if node_id is not None else None
+    except (TypeError, ValueError):
+        node_id_i = None
+    return human[:500], node_id_i
+
 
 GRID_DIR = "bench_grids"
 GRID_JPEG_QUALITY = 85
@@ -526,14 +597,22 @@ class BenchRunner:
         deadline = time.time() + timeout_s
         last_progress = time.time()
 
-        def _finish(status, output=None, error=None):
-            store.set_model_status(self.bench_id, model_key, status=status,
-                                   output=output, error=error)
+        def _finish(status, output=None, error=None, error_human=None, error_node=None):
+            fields = {"status": status, "output": output, "error": error}
+            if error_human is not None:
+                fields["error_human"] = error_human
+            if error_node is not None:
+                fields["error_node"] = error_node
+            store.set_model_status(self.bench_id, model_key, **fields)
             if pid:
                 _forget_pid(pid)
             hub.publish({"type": "model_done", "bench_id": self.bench_id,
                          "model_key": model_key, "status": status,
                          "output": output})
+            if status in ("error", "timeout", "no_output"):
+                log.warning("bench %s | %s | %s | %s",
+                            self.bench_id, model_key, status,
+                            error_human or error or "no message")
 
         while time.time() < deadline:
             if self._stop.is_set():
@@ -545,6 +624,12 @@ class BenchRunner:
                 last_progress = time.time()
                 if sstr == "success":
                     out_file = self._output_from_history(entry, model_name)
+                    if not out_file:
+                        # ComfyUI reported success but produced no usable
+                        # image — a distinct terminal status, not 'success'.
+                        _finish("no_output", output=None,
+                                error_human="ComfyUI reported success but no output image was found")
+                        return
                     _finish("success", output=out_file)
                     if out_file:
                         row = {
@@ -563,12 +648,24 @@ class BenchRunner:
                         store.add_output(row)
                     return
                 if sstr in ("error", "cancelled"):
-                    err = None
+                    err_raw = None
+                    err_human = None
+                    err_node = None
                     for m in (entry.get("status") or {}).get("messages", []):
-                        if m[0] == "execution_error":
-                            err = m[1].get("exception_message") or str(m[1])
-                    _finish("error" if sstr == "error" else "cancelled",
-                            error=err)
+                        if isinstance(m, list) and m and m[0] == "execution_error" \
+                                and len(m) >= 2 and isinstance(m[1], dict):
+                            err_obj = m[1]
+                            err_human, err_node = _summarize_execution_error(err_obj)
+                            err_raw = err_obj.get("exception_message") or \
+                                err_obj.get("message") or str(err_obj)
+                            break
+                    if sstr == "error":
+                        if not err_human:
+                            err_human = (err_raw or "execution error")[:500]
+                        _finish("error", error=str(err_raw or "")[:2000],
+                                error_human=err_human, error_node=err_node)
+                    else:
+                        _finish("cancelled")
                     return
             else:
                 # No history yet. If the prompt was dropped from ComfyUI's
@@ -578,10 +675,43 @@ class BenchRunner:
                 if stall_s and pid and not self._prompt_in_queue(pid) \
                         and (time.time() - last_progress) > stall_s:
                     _finish("timeout",
-                            error="dropped from ComfyUI queue (interrupted/hung)")
+                            error="dropped from ComfyUI queue (interrupted/hung)",
+                            error_human="dropped from ComfyUI queue (interrupted/hung)")
                     return
             time.sleep(3)
-        _finish("timeout")
+        _finish("timeout",
+                error_human="Timed out after %s s (no completion from ComfyUI)" % timeout_s)
+
+    def _mark_queue_error(self, mk, error_body, error_str):
+        """Store a queue/submission failure with a human-readable summary and
+        log it. error_body is the structured dict/list (may be None);
+        error_str is the raw string (may be None)."""
+        human = _summarize_queue_error(error_body) if error_body is not None \
+            else _summarize_queue_error(error_str)
+        if not human and error_str:
+            human = str(error_str)[:500]
+        error_raw = error_str
+        if error_body is not None:
+            try:
+                import json as _json
+                error_raw = _json.dumps(error_body, ensure_ascii=False)[:2000]
+            except Exception:
+                error_raw = str(error_body)[:2000]
+        fields = {"status": "queue_error", "error": error_raw, "error_human": human}
+        # capture node id when present (first node_errors key)
+        if isinstance(error_body, dict):
+            ne = error_body.get("node_errors") or {}
+            if isinstance(ne, dict) and ne:
+                k0 = next(iter(ne))
+                try:
+                    fields["error_node"] = int(k0)
+                except (TypeError, ValueError):
+                    pass
+        store.set_model_status(self.bench_id, mk, **fields)
+        hub.publish({"type": "model_done", "bench_id": self.bench_id,
+                     "model_key": mk, "status": "queue_error"})
+        log.warning("bench %s | %s | queue_error | %s",
+                    self.bench_id, mk, human or error_raw or "unknown error")
 
     def run(self, timeout_s=900, stall_s=180):
         self._bench_since = time.time()
@@ -604,16 +734,10 @@ class BenchRunner:
                                          prompt_node_id=self.prompt_node_id)
                 r = self.comfy.queue_prompt(prompt)
             except Exception as e:
-                store.set_model_status(self.bench_id, mk, status="queue_error",
-                                       error=str(e)[:400])
-                hub.publish({"type": "model_done", "bench_id": self.bench_id,
-                             "model_key": mk, "status": "queue_error"})
+                self._mark_queue_error(mk, None, str(e))
                 continue
             if not r.get("ok"):
-                store.set_model_status(self.bench_id, mk, status="queue_error",
-                                       error=str(r.get("error"))[:400])
-                hub.publish({"type": "model_done", "bench_id": self.bench_id,
-                             "model_key": mk, "status": "queue_error"})
+                self._mark_queue_error(mk, r.get("error_body"), r.get("error"))
                 continue
             store.set_model_status(self.bench_id, mk, status="running",
                                    prompt_id=r.get("prompt_id"))
@@ -689,16 +813,10 @@ class LoraBenchRunner(BenchRunner):
                     lora_node_id=self.workflow.get("lora_node_id"))
                 r = self.comfy.queue_prompt(prompt)
             except Exception as e:
-                store.set_model_status(self.bench_id, key, status="queue_error",
-                                       error=str(e)[:400])
-                hub.publish({"type": "model_done", "bench_id": self.bench_id,
-                             "model_key": key, "status": "queue_error"})
+                self._mark_queue_error(key, None, str(e))
                 continue
             if not r.get("ok"):
-                store.set_model_status(self.bench_id, key, status="queue_error",
-                                       error=str(r.get("error"))[:400])
-                hub.publish({"type": "model_done", "bench_id": self.bench_id,
-                             "model_key": key, "status": "queue_error"})
+                self._mark_queue_error(key, r.get("error_body"), r.get("error"))
                 continue
             store.set_model_status(self.bench_id, key, status="running",
                                    prompt_id=r.get("prompt_id"))
@@ -760,12 +878,18 @@ def _run_one(runner, timeout_s):
         _active[runner.bench_id] = runner
     hub.set_active_bench(runner.bench_id)
     store.mark_running(runner.bench_id)
+    log.info("bench %s | start | models=%s timeout_s=%s",
+             runner.bench_id, getattr(runner, "models", None) and len(runner.models)
+             or getattr(runner, "steps", None) and len(runner.steps) or "?", timeout_s)
     try:
         runner.run(timeout_s=timeout_s)
-        store.mark_bench(runner.bench_id, "stopped" if runner.was_stopped() else "finished")
+        final = "stopped" if runner.was_stopped() else "finished"
+        store.mark_bench(runner.bench_id, final)
+        log.info("bench %s | end | %s", runner.bench_id, final)
     except Exception as e:
         store.mark_bench(runner.bench_id, "error")
         store.update_bench(runner.bench_id, error=str(e)[:400])
+        log.error("bench %s | end | error | %s", runner.bench_id, str(e)[:200])
     finally:
         with _active_lock:
             _active.pop(runner.bench_id, None)
