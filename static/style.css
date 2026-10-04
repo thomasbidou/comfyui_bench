@@ -241,6 +241,13 @@ label.field .lab{font-size:12.5px;color:var(--dim);font-weight:600;margin-bottom
   object-fit:contain;background:#000;border-radius:var(--radius-s);border:1px solid var(--border)}
 .modal.full .mb2.single .cap{display:flex;flex-wrap:wrap;gap:8px 18px;justify-content:center;font-size:13px}
 
+/* contact-sheet full-window grid (spinner while the server builds on first hit) */
+.modal.full .mb2.gridwrap{display:flex;flex-direction:column;align-items:center;gap:12px;padding:24px;overflow:auto}
+.modal.full .mb2.gridwrap img{max-width:100%;width:min(100%,1200px);height:auto;background:#000;border-radius:var(--radius-s);border:1px solid var(--border);box-shadow:0 0 0 1px rgba(0,0,0,.4)}
+.gridspin{display:flex;flex-direction:column;align-items:center;gap:12px;padding:40px;color:#ccc}
+.spin-lg{width:42px;height:42px;border:4px solid rgba(255,255,255,.15);border-top-color:var(--acc);border-radius:50%;animation:sp .8s linear infinite}
+.grid-err{text-align:center;padding:40px;color:#e0a0a0;font-size:15px}
+
 /* 👁 eye overlay on 3+ compare-grid figures — mirrors .ocell .eye; figure needs a containing block */
 .cmp-grid figure{position:relative}
 .cmp-grid .eye{position:absolute;top:8px;left:8px;z-index:3;width:30px;height:30px;

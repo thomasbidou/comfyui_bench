@@ -44,7 +44,7 @@ from workflows import (workflow_summary, detect_model_loader,
 from bench import (store, hub, start_bench, start_lora_bench, stop_bench, is_active, is_queued,
                    queue_position, pending_queue, active_bench_ids,
                    start_ws_listener_on_loop,
-                   stop_ws_listener)
+                   stop_ws_listener, build_bench_grid, _grid_lock)
 from comfy import ComfyUI
 from PIL import Image
 
@@ -742,6 +742,18 @@ def api_benches(request: Request, kind: Optional[str] = None):
         b["active"] = b["id"] in active
         b["queued"] = b["id"] in queue
         b["queue_position"] = queue.index(b["id"]) if b["id"] in queue else None
+        # Grid availability: a saved grid file that still exists on disk.
+        # (bench["done"] is a counter and can be stale after output cleanup,
+        #  so the Home grid button gates on the real valid-output count.)
+        kind = b.get("kind") or "model"
+        valid = sum(
+            1 for o in store.list_outputs(bench_id=b["id"])
+            if (o.get("kind") or "model") == kind
+            and o.get("output") and os.path.isfile(o["output"])
+        )
+        g = b.get("grid_image")
+        b["grid_ready"] = bool(g and os.path.isfile(g))
+        b["grid_valid"] = valid          # >=1 → first click may lazy-build
     return {"benches": benches, "active": active, "queue": queue}
 
 
@@ -755,6 +767,42 @@ def api_bench_get(request: Request, bid: str):
     b["queued"] = is_queued(bid)
     b["queue_position"] = queue_position(bid)
     return b
+
+
+@app.get("/api/benches/{bid}/grid/info")
+def api_bench_grid_info(request: Request, bid: str):
+    require_auth(request)
+    b = store.get_bench(bid) or {}
+    path = b.get("grid_image") or ""
+    ready = bool(path and os.path.isfile(path))
+    return {"ready": ready, "path": path,
+            "n_outputs": b.get("done", 0),
+            "kind": b.get("kind") or "model"}
+
+
+@app.get("/api/benches/{bid}/grid")
+def api_bench_grid(request: Request, bid: str):
+    """Serve (building on first call) the bench's labelled contact sheet."""
+    require_auth(request)
+    b = store.get_bench(bid)
+    if not b:
+        raise HTTPException(status_code=404, detail="bench not found")
+    path = b.get("grid_image")
+    if not (path and os.path.isfile(path)):
+        with _grid_lock(bid):
+            path = b.get("grid_image")
+            if not (path and os.path.isfile(path)):
+                path = build_bench_grid(bid)
+                b = store.get_bench(bid) or {}
+                path = b.get("grid_image") or path
+    if not (path and os.path.isfile(path)):
+        raise HTTPException(status_code=404, detail="no grid (0 valid outputs)")
+    return FileResponse(
+        path, media_type="image/jpeg",
+        headers={
+            "Cache-Control": "public, max-age=86400",
+            "Content-Disposition": f'inline; filename="bench_grid_{bid}.jpg"',
+        })
 
 
 class RunIn(BaseModel):

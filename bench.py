@@ -12,6 +12,7 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import threading
 import time
@@ -238,6 +239,178 @@ class BenchStore:
 
 
 store = BenchStore()
+
+
+# ---------------------------------------------------------------------------
+# Grid (contact sheet) builder — one labelled image per bench, composed with
+# Pillow from that bench's successful outputs.  Lives ONLY in
+# state/benches.json[bid]["grid_image"] (a file path); never in outputs.json.
+# ---------------------------------------------------------------------------
+log = logging.getLogger(__name__)
+
+GRID_DIR = "bench_grids"
+GRID_JPEG_QUALITY = 85
+CELL_W = 440          # px, thumbnail width (square)
+LABEL_H = 26          # px, mono label band ABOVE the thumbnail
+TITLE_H = 56          # px, bench title band at the top
+GAP = 14             # px, margins + cell gutters
+GRID_BG = (255, 255, 255)
+GRID_TEXT = (24, 24, 24)
+GRID_BORDER = (220, 220, 220)
+GRID_MISSING_BG = (255, 235, 235)
+GRID_MISSING_FG = (150, 40, 40)
+_GRID_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+_GRID_FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
+_GRID_LOCKS: dict = {}
+_GRID_LOCKS_GUARD = threading.Lock()
+
+
+def _grid_lock(bench_id: str) -> threading.Lock:
+    """Per-bench build lock (avoids two concurrent builds of the same bench)."""
+    with _GRID_LOCKS_GUARD:
+        lk = _GRID_LOCKS.get(bench_id)
+        if lk is None:
+            lk = threading.Lock()
+            _GRID_LOCKS[bench_id] = lk
+        return lk
+
+
+def _grid_font(size: int, bold: bool = False):
+    from PIL import ImageFont
+    try:
+        return ImageFont.truetype(
+            _GRID_FONT_BOLD if bold else _GRID_FONT, size)
+    except Exception:
+        log.warning("grid: DejaVu font missing, falling back to default")
+        return ImageFont.load_default()
+
+
+def _truncate_text(draw, text: str, font, max_w: float) -> str:
+    if draw.textlength(text, font=font) <= max_w:
+        return text
+    while text and draw.textlength(text + "…", font=font) > max_w:
+        text = text[:-1]
+    return (text + "…").strip()
+
+
+def grid_label(bench: dict, output: dict) -> str:
+    """'2.9V5' for a model bench, 'Bcurtains-lift_v1-000014 @ 0.60' for LoRA."""
+    if (bench.get("kind") or "model") == "lora":
+        name = output.get("lora_name") or output.get("model_name") or "?"
+        name = name.split("/")[-1]
+        if name.lower().endswith(".safetensors"):
+            name = name[:-len(".safetensors")]
+        s = output.get("strength")
+        return f"{name} @ {float(s):.2f}" if s is not None else name
+    name = output.get("model_name") or output.get("model_key") or "?"
+    base = name.split("/")[-1]
+    for ext in (".safetensors", ".ckpt", ".pt", ".png", ".jpg"):
+        if base.lower().endswith(ext):
+            base = base[: -len(ext)]
+            break
+    return base
+
+
+def _col_count(n: int) -> int:
+    """1 cell -> 1 col; 2-3 -> 2; 4-9 -> 3; 10-18 -> 4; >=19 -> 5."""
+    if n <= 1:
+        return 1
+    if n <= 3:
+        return 2
+    if n <= 9:
+        return 3
+    if n <= 18:
+        return 4
+    return 5
+
+
+def build_bench_grid(bench_id: str) -> Optional[str]:
+    """Compose the labelled contact sheet for this bench and save it as
+    <output_root>/bench_grids/bench_grid_<bench_id>.jpg.
+
+    Returns the absolute path on success, None when the bench has 0 valid
+    outputs. Idempotent: if the saved file already exists and no output is
+    newer than it, the existing file is returned without recomputing.
+    """
+    from PIL import Image, ImageDraw
+
+    b = store.get_bench(bench_id)
+    if not b:
+        return None
+    kind = b.get("kind") or "model"
+    rows = [o for o in store.list_outputs(bench_id=bench_id)
+            if (o.get("kind") or "model") == kind]
+    rows = [o for o in rows if o.get("output") and os.path.isfile(o["output"])]
+    if not rows:
+        return None
+    rows.sort(key=lambda o: o.get("created", 0))  # generation order
+
+    out_root = config.get("output_root") or ""
+    if not out_root or not os.path.isdir(out_root):
+        log.error("grid: output_root missing for bench %s", bench_id)
+        return None
+    grid_dir = os.path.join(out_root, GRID_DIR)
+    os.makedirs(grid_dir, exist_ok=True)
+    path = os.path.join(grid_dir, f"bench_grid_{bench_id}.jpg")
+
+    # Idempotence: reuse the saved grid unless an output is newer than it.
+    try:
+        if os.path.isfile(path):
+            grid_mt = os.path.getmtime(path)
+            if all(os.path.getmtime(o["output"]) <= grid_mt
+                   for o in rows):
+                return path
+    except OSError:
+        pass
+
+    n = len(rows)
+    cols = _col_count(n)
+    rows_n = (n + cols - 1) // cols
+    W = cols * CELL_W + (cols + 1) * GAP
+    H = TITLE_H + GAP + rows_n * (LABEL_H + CELL_W) + (rows_n - 1) * GAP + GAP
+
+    canvas = Image.new("RGB", (W, H), GRID_BG)
+    draw = ImageDraw.Draw(canvas)
+    font_title = _grid_font(22, bold=True)
+    font_label = _grid_font(15)
+    font_small = _grid_font(12)
+
+    title = f"{b.get('workflow_name') or 'bench'}  ·  seed {b.get('seed', '—')}  ·  {n} image(s)"
+    title = _truncate_text(draw, title, font_title, W - 2 * GAP)
+    tw = draw.textlength(title, font=font_title)
+    draw.text(((W - tw) / 2, (TITLE_H - 22) / 2), title, fill=GRID_TEXT,
+              font=font_title)
+
+    for i, o in enumerate(rows):
+        r, c = divmod(i, cols)
+        x0 = GAP + c * (CELL_W + GAP)
+        y0 = TITLE_H + GAP + r * (LABEL_H + CELL_W + GAP)
+        label = _truncate_text(draw, grid_label(b, o), font_label, CELL_W)
+        draw.text((x0, y0), label, fill=GRID_TEXT, font=font_label)
+        img_y = y0 + LABEL_H
+        try:
+            with Image.open(o["output"]) as im:
+                im = im.convert("RGB")
+                im.thumbnail((CELL_W, CELL_W), Image.Resampling.LANCZOS)
+                canvas.paste(im,
+                             (x0 + (CELL_W - im.width) // 2,
+                              img_y + (CELL_W - im.height) // 2))
+        except Exception as e:
+            log.warning("grid: can't load %s: %s", o["output"], e)
+            draw.rectangle([x0, img_y, x0 + CELL_W, img_y + CELL_W],
+                           fill=GRID_MISSING_BG, outline=GRID_BORDER, width=1)
+            msg = _truncate_text(draw, "⚠ missing / unreadable", font_small,
+                                 CELL_W - 8)
+            mw = draw.textlength(msg, font=font_small)
+            draw.text((x0 + (CELL_W - mw) / 2,
+                       img_y + CELL_W / 2 - 8), msg, fill=GRID_MISSING_FG,
+                      font=font_small)
+        draw.rectangle([x0, img_y, x0 + CELL_W, img_y + CELL_W],
+                       outline=GRID_BORDER, width=1)
+
+    canvas.save(path, "JPEG", quality=GRID_JPEG_QUALITY)
+    store.update_bench(bench_id, grid_image=path)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -597,6 +770,12 @@ def _run_one(runner, timeout_s):
         with _active_lock:
             _active.pop(runner.bench_id, None)
         hub.publish({"type": "bench_finished", "bench_id": runner.bench_id})
+        # Auto-generate the labelled contact sheet (idempotent; safe to call
+        # for benches that ended stopped/finished/error with >=1 output).
+        try:
+            build_bench_grid(runner.bench_id)
+        except Exception:
+            log.exception("grid auto-build failed for %s", runner.bench_id)
 
 
 def start_bench(models, workflow, seed=None, prompt_text=None,

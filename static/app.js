@@ -38,6 +38,7 @@ class ApiError extends Error { constructor(s, d) { super(d); this.status = s; th
 
 function fileUrl(p) { return "/api/files?path=" + encodeURIComponent(p); }
 function thumbUrl(p, size) { return "/api/thumb?path=" + encodeURIComponent(p) + "&size=" + (size || 400); }
+
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c =>
   ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c])); }
 function fmtBytes(n) { if (!n) return "—";
@@ -432,6 +433,11 @@ function benchClickHandler(e) {
   const bench = row.__bench;
   if (btn) {
     const act = btn.dataset.act;
+    if (act === "grid") {
+      e.stopPropagation();
+      openGrid(bid, bench);
+      return;
+    }
     if (act === "del") {
       e.stopPropagation();
       if (!confirm("Delete this bench record? (Images are kept on disk.)")) return;
@@ -467,6 +473,73 @@ function benchClickHandler(e) {
   // row click -> outputs for this bench (LoRA benches land on the LoRA tab)
   const bk = row.dataset.bk || "model";
   location.hash = "#/outputs?bench=" + encodeURIComponent(bid) + (bk === "lora" ? "&kind=lora" : "");
+}
+
+// Grid contact-sheet: full-screen modal in-page (was a new tab). First click
+// may trigger a server-side build (5–18 s for 85 images) — the spinner
+// covers the wait while the <img> request runs.
+function openGrid(bid, bench) {
+  try {
+    const title = "🖼️ " + ((bench && bench.workflow_name) ? bench.workflow_name : "Grille contact-sheet");
+    const box = modal(`<div class="mh"><h2 style="margin:0">${esc(title)}</h2>
+      <div class="row">
+        <button class="btn small" id="grid-dl" type="button">⬇ Télécharger</button>
+        <button class="btn small" type="button" data-close>Close ✕</button>
+      </div></div>
+      <div class="mb2 gridwrap">
+        <div id="grid-spin" class="gridspin"><div class="spin-lg"></div><div class="muted">Génération de la grille… (1ʳᵉ fois : 5-18 s)</div></div>
+        <img id="grid-img" style="display:none" alt="">
+        <div id="grid-err" class="grid-err" style="display:none"></div>
+      </div>`, { full: true });
+    const url = "/api/benches/" + encodeURIComponent(bid) + "/grid";
+    const spin = box.querySelector("#grid-spin");
+    const img = box.querySelector("#grid-img");
+    const errEl = box.querySelector("#grid-err");
+    const showErr = (main, sub) => {
+      spin.style.display = "none";
+      errEl.innerHTML = main + (sub ? `<div class="muted" style="margin-top:8px;font-size:13px">${esc(sub)}</div>` : "");
+      errEl.style.display = "";
+    };
+    img.onload = () => { spin.style.display = "none"; img.style.display = ""; };
+    img.onerror = () => {
+      spin.style.display = "none";
+      // The <img> request already failed; probe the status to distinguish
+      // 404 (no valid outputs) from auth expiry (401/403) from server errors.
+      fetch(url, { method: "GET" }).then(r => {
+        if (r.status === 404) showErr("⚠️ Aucune image pour cette grille", "0 output valide — rien à afficher.");
+        else if (r.status === 401 || r.status === 403) showErr("⚠️ Aucune image pour cette grille", "Session expirée — reconnectez-vous.");
+        else if (r.status >= 500) showErr("⚠️ Aucune image pour cette grille", "Erreur serveur (HTTP " + r.status + ") — réessayez plus tard.");
+        else showErr("⚠️ Aucune image pour cette grille", "Erreur inattendue (HTTP " + r.status + ").");
+        return r.body ? r.body.cancel() : null;
+      }).catch(() => showErr("⚠️ Aucune image pour cette grille", "Impossible de contacter le serveur."));
+    };
+    // Same-origin <a download> → the cb_token cookie is sent automatically;
+    // the server builds the sheet on demand if it isn't cached yet.
+    box.querySelector("#grid-dl").onclick = () => {
+      const a = document.createElement("a");
+      a.href = url; a.download = "bench_grid_" + bid + ".jpg";
+      document.body.appendChild(a); a.click(); a.remove();
+    };
+    // Kick off the image load — this is what triggers the server-side
+    // build on first use (5–18 s, spinner covers it) or the cache hit.
+    img.src = url;
+    // Escape closes: active ONLY while this modal is the topmost one and
+    // never while typing in a field. Detached on close via __onclose
+    // (same pattern as the single-image viewer).
+    const back = box.parentElement;             // the .modal-back backdrop
+    const onKey = (e) => {
+      if (e.key !== "Escape") return;
+      const root = document.getElementById("modal-root");
+      if (!root || root.lastElementChild !== back) return; // topmost guard
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      closeModal();
+    };
+    window.addEventListener("keydown", onKey);
+    box.__onclose = () => window.removeEventListener("keydown", onKey);
+  } catch (err) {
+    toast(err.message);
+  }
 }
 function startBenchRerun(b) {
   const isLora = (b.kind || "model") === "lora";
@@ -555,6 +628,9 @@ function benchRow(b) {
     <button class="btn small" data-act="settings" data-bid="${esc(b.id)}" title="Show / hide the run's settings"><span class="caret">▾</span> settings</button>
     <button class="btn small primary" data-act="rerun" data-bid="${esc(b.id)}" title="Re-open the bench form with this run's settings">Rerun</button>
     <button class="btn small" data-act="view" data-bid="${esc(b.id)}" data-out="${esc(outHref)}">Outputs</button>
+    ${b.grid_ready || (b.grid_valid >= 1)
+      ? `<button class="btn small" data-act="grid" data-bid="${esc(b.id)}" title="${b.grid_ready ? "Ouvrir la grille contact-sheet (une image avec toutes les vignettes labellisées)" : "Générer + ouvrir la grille contact-sheet (1re fois : 5-15 s)"}">🖼️ Grille</button>`
+      : `<button class="btn small" disabled title="Pas encore de grille (aucun output valide)">🖼️ Grille</button>`}
     <button class="btn small danger" data-act="del" data-bid="${esc(b.id)}">✕</button>
   </div>
   <div class="benchsettings hidden" data-bid="${esc(b.id)}">
@@ -2384,6 +2460,8 @@ async function renderOutputs() {
         <button class="btn small" id="o-all">Select all</button>
         <button class="btn primary" id="o-cmp">Compare selected (0)</button>
         <button class="btn small" id="o-clear">Clear</button>
+        ${benchId ? `<button class="btn small" id="o-gridbtn" title="Ouvrir la grille contact-sheet (une image avec toutes les vignettes labellisées)">🖼️ Grille</button>
+        <button class="btn small" id="o-grid-dl" title="Télécharger la grille (JPEG)">⬇ Télécharger</button>` : ""}
       </div>
     </div>
     <div class="ogrid" id="o-grid"></div>`;
@@ -2456,6 +2534,22 @@ async function renderOutputs() {
     openCompare([...outSel.values()]);
   };
   document.getElementById("o-clear").onclick = () => { outSel.clear(); outState.q = ""; qEl.value = ""; drawGrid(); cmpCount(); };
+  if (benchId) {
+    // 🖼️ Grille: full-screen modal (no bench object here → default title).
+    document.getElementById("o-gridbtn").onclick = (e) => openGrid(benchId);
+    // ⬇ Télécharger: force download of the JPEG (same endpoint, download attr).
+    document.getElementById("o-grid-dl").onclick = (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        const u = "/api/benches/" + encodeURIComponent(benchId) + "/grid";
+        const a = document.createElement("a");
+        a.href = u; a.download = "bench_grid_" + benchId + ".jpg";
+        document.body.appendChild(a); a.click(); a.remove();
+      } catch (err) { toast("Grille: " + (err.message || "error")); }
+      finally { btn.disabled = false; }
+    };
+  }
   document.getElementById("o-all").onclick = () => {
     // Select exactly the currently-visible (search-filtered) outputs,
     // additively — matches the Models (#sel-all) and Run-bench (#r-all) convention.

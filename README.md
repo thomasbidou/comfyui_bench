@@ -55,6 +55,22 @@ frontend.
   there use **← / → keys or the on-screen arrows** to step through the set
   (all filtered outputs, or just the compared images when opened from the
   compare grid), with a **N / M** counter.
+- **Bench contact sheet (grid)** — every bench also produces a single
+  **labelled contact sheet**: one composite JPEG with a title bar (the workflow
+  name), the outputs laid out in an adaptive grid (1→1 col, 2–3→2, 4–9→3,
+  10–18→4, ≥19→5; 440 px square cells), each cell labelled with its model
+  name — or the LoRA name + strength for a LoRA sweep — and any missing output
+  shown as a red placeholder. It's **auto-generated when a bench finishes**
+  (`build_bench_grid`, Pillow, idempotent — rebuilt only if an output is newer
+  than the saved sheet) into `<output_root>/bench_grids/`, and **built lazily
+  on first view** if it doesn't exist yet (5–18 s, spinner covers it).
+  `GET /api/benches/{bid}/grid` serves it (404 if the bench has no valid
+  output); `GET /api/benches/{bid}/grid/info` reports its readiness, and
+  `GET /api/benches` now exposes `grid_ready` + `grid_valid` per bench. In the
+  UI: a **🖼️ Grille** button on each **Home** row and in the **Outputs** header
+  opens the sheet in a **full-screen in-page modal** (no new tab) with a
+  **⬇ Télécharger** button; a bench with no valid output shows its button
+  disabled, and opening one anyway surfaces a clear "0 output valide" panel.
 - **LoRA browser** — a dedicated **LoRAs** page: a folder tree of every LoRA
   under your configured LoRA roots, each with its preview, name, size, Civitai
   metadata, and **star rating + notes**. Search, sort, and refresh; a **cached
