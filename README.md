@@ -236,7 +236,8 @@ uvicorn server:app --host 0.0.0.0 --port 7860
 ## How a bench works
 
 1. You pick a **workflow** (an API-format prompt containing a
-   `CheckpointLoaderSimple` or `UNETLoaderWithName` node) and one or more
+   `CheckpointLoaderSimple`, `UNETLoader` (Load Diffusion Model) or
+   `UNETLoaderWithName` node) and one or more
    models.
 2. For each model the app swaps the model reference into the workflow's loader
    node, applies the **fixed seed** to every seed node, and (optionally) your

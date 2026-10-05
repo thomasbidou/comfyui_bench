@@ -1,8 +1,9 @@
 """Workflow analysis + per-model prompt assembly.
 
 A workflow is a ComfyUI API-format prompt (dict of nodes). We detect:
-  * the model loader node (CheckpointLoaderSimple -> ckpt_name, or
-    UNETLoaderWithName -> unet_name) and which field to swap per model
+  * the model loader node (CheckpointLoaderSimple -> ckpt_name, or a UNET
+    loader — UNETLoader / UNETLoaderWithName -> unet_name) and which field
+    to swap per model
   * the base prompt text node (the main CLIPTextEncode feeding the sampler)
   * every seed node (KSampler* and any node with a 'seed' input) so a fixed
     seed can be applied to the whole graph
@@ -17,10 +18,17 @@ import os
 import re
 
 CHECKPOINT_LOADER = "CheckpointLoaderSimple"
+# Canonical UNET loader type reported in workflow summaries. ComfyUI ships
+# two node classes that load a bare diffusion model into the same `unet_name`
+# field — `UNETLoaderWithName` (the newer node) and `UNETLoader` (the
+# "Load Diffusion Model" node, the one in the Anima presets) — and we treat
+# both as the same thing downstream, so we normalize to this canonical name.
 UNET_LOADER = "UNETLoaderWithName"
+UNET_LOADER_VARIANTS = ("UNETLoaderWithName", "UNETLoader")
 LOADER_FIELDS = {
     CHECKPOINT_LOADER: "ckpt_name",
-    UNET_LOADER: "unet_name",
+    "UNETLoaderWithName": "unet_name",
+    "UNETLoader": "unet_name",
 }
 # LoRA loader nodes: a strength-sweep bench targets one of these. LoraLoader
 # has strength_model + strength_clip; LoraLoaderModelOnly has strength_model
@@ -163,11 +171,17 @@ def detect_prompt_node(prompt):
 
 def workflow_summary(prompt):
     loader = detect_model_loader(prompt)
+    # Normalize UNETLoader / UNETLoaderWithName to the canonical name so
+    # downstream comparisons (model_name_for, UI warnings) treat both the
+    # same — they share the `unet_name` field and the diffusion_models root.
+    loader_type = loader[1]
+    if loader_type in UNET_LOADER_VARIANTS:
+        loader_type = UNET_LOADER
     seeds = detect_seed_nodes(prompt)
     pnode, ptext, candidates = detect_prompt_node(prompt)
     return {
         "model_node_id": loader[0],
-        "loader_type": loader[1],
+        "loader_type": loader_type,
         "model_field": loader[2],
         "seed_node_ids": seeds,
         "prompt_node_id": pnode,
@@ -180,11 +194,12 @@ def workflow_summary(prompt):
 def model_name_for(model, loader_type):
     """The model identifier a loader node expects.
 
-    UNETLoaderWithName  -> name relative to the diffusion_models root,
-                           e.g. "Anima/toon/x.safetensors"
+    UNET loader (UNETLoader / UNETLoaderWithName)
+                           -> name relative to the diffusion_models root,
+                              e.g. "Anima/toon/x.safetensors"
     CheckpointLoaderSimple -> the bare checkpoint filename, e.g. "x.ckpt"
     """
-    if loader_type == UNET_LOADER:
+    if loader_type in UNET_LOADER_VARIANTS:
         root = model.get("root", "")
         if root and model.get("path", "").startswith(root):
             rel = os.path.relpath(model["path"], root).replace(os.sep, "/")
@@ -428,6 +443,7 @@ def validate_model_name_for_loader(model_name, loader_type):
         if model_name.startswith(("Anima/",)) and model_name.endswith(".safetensors"):
             return None
         return None
-    if loader_type == UNET_LOADER and not model_name.endswith(".safetensors"):
-        return "workflow uses UNETLoaderWithName (expects a .safetensors UNET name)"
+    if loader_type in UNET_LOADER_VARIANTS and not model_name.endswith(".safetensors"):
+        return ("workflow uses a UNET loader (UNETLoader / UNETLoaderWithName) — "
+                "expects a .safetensors UNET name")
     return None

@@ -459,7 +459,7 @@ async def api_workflow_add(request: Request, body: WorkflowIn):
     if not summary["model_node_id"]:
         raise HTTPException(status_code=400,
                             detail="no model loader node found "
-                                   "(CheckpointLoaderSimple / UNETLoaderWithName)")
+                                   "(CheckpointLoaderSimple / UNETLoader / UNETLoaderWithName)")
     # Honor the user's explicit kind ('model' | 'lora'); auto-derive when
     # absent. A 'model' workflow keeps kind='model' even with LoRA nodes.
     dk, dnode, dsupported = _resolve_workflow_kind(
@@ -524,7 +524,7 @@ async def api_workflow_upload(request: Request):
     if not summary["model_node_id"]:
         raise HTTPException(status_code=400,
                             detail="no model loader node found "
-                                   "(CheckpointLoaderSimple / UNETLoaderWithName)")
+                                   "(CheckpointLoaderSimple / UNETLoader / UNETLoaderWithName)")
     # Optional 'kind' form field (values 'model'/'lora'/''). Empty or absent
     # → auto-derive from node presence (current behavior).
     kind = str(form.get("kind") or "").strip() or None

@@ -1683,7 +1683,7 @@ async function renderWorkflows() {
       : `<div class="empty">No workflows. Upload or add one.</div>`)}</div>
     <div id="wf-editor" class="card mt hidden"></div>
     <div class="card mt hidden" id="wf-addcard"><h3>Add a workflow</h3>
-      <p class="muted small">Paste a ComfyUI <b>API-format</b> prompt (JSON, the <code>prompt</code> object from a workflow — not the UI graph). It must contain a <code>CheckpointLoaderSimple</code> or <code>UNETLoaderWithName</code> node (or a <code>LoraLoader</code> node for LoRA workflows).</p>
+      <p class="muted small">Paste a ComfyUI <b>API-format</b> prompt (JSON, the <code>prompt</code> object from a workflow — not the UI graph). It must contain a <code>CheckpointLoaderSimple</code>, <code>UNETLoader</code> (« Load Diffusion Model ») or <code>UNETLoaderWithName</code> node (or a <code>LoraLoader</code> node for LoRA workflows).</p>
       <label class="field"><span class="lab">Name</span><input id="wf-name" placeholder="e.g. Text to Image (Anima)"></label>
       <label class="field"><span class="lab">Description</span><input id="wf-desc" placeholder="optional"></label>
       <label class="field"><span class="lab">API prompt (JSON)</span>
