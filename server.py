@@ -49,7 +49,7 @@ from bench import (store, hub, start_bench, start_lora_bench, stop_bench, is_act
                    queue_position, pending_queue, active_bench_ids,
                    start_ws_listener_on_loop,
                    stop_ws_listener, build_bench_grid, _grid_lock)
-from comfy import ComfyUI
+from comfy import ComfyUI, make_comfy
 from PIL import Image
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -998,6 +998,9 @@ class ConfigIn(BaseModel):
     default_seed: Optional[int] = None
     dark_mode: Optional[bool] = None
     comfy_dir: Optional[str] = None
+    # ComfyUI-Login token override ("" or absent = auto-derive from the
+    # comfy_dir login/PASSWORD file).
+    comfy_token: Optional[str] = None
     # Default base model for LoRA strength-sweep benches (model key, or
     # None/"" to clear).
     lora_bench_default_model: Optional[str] = None
@@ -1034,10 +1037,19 @@ def api_config_token(request: Request):
 def api_config_test(request: Request):
     require_auth(request)
     base = config.get("comfy_base")
-    comfy = ComfyUI(base)
+    comfy = make_comfy(config)
     alive = comfy.alive()
     stats = comfy.system_stats() if alive else None
-    return {"ok": alive, "base": base,
+    reason = None
+    if not alive:
+        code = comfy.probe_code()
+        if code in (301, 302, 303, 307, 308):
+            reason = ("ComfyUI is up but requires login (ComfyUI-Login). "
+                      "Check comfy_dir points at the install whose "
+                      "login/PASSWORD holds the token.")
+        elif code in (401, 403):
+            reason = "ComfyUI rejected the auth token (invalid/rotated)."
+    return {"ok": alive, "base": base, "reason": reason,
             "device": (stats or {}).get("devices"),
             "system": (stats or {}).get("system")}
 
@@ -1134,7 +1146,7 @@ async def api_admin_restart(request: Request,
 @app.get("/api/stats")
 def api_stats(request: Request):
     require_auth(request)
-    comfy = ComfyUI(config.get("comfy_base") or "http://127.0.0.1:8188")
+    comfy = make_comfy(config)
     return {"stats": comfy.system_stats(), "queue": comfy.queue_info()}
 
 
@@ -1238,7 +1250,7 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
-    comfy = ComfyUI(config.get("comfy_base") or "http://127.0.0.1:8188")
+    comfy = make_comfy(config)
     start_ws_listener_on_loop(comfy, loop)
     yield
     await stop_ws_listener()

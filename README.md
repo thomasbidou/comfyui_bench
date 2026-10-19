@@ -206,6 +206,24 @@ Change these on the **Setup** page (or edit `state/config.json`), then click
 **⟳ refresh** on the Models page. The **Test connection** button confirms the
 ComfyUI link and reports the GPU it sees.
 
+### ComfyUI-Login (password-protected ComfyUI)
+
+If ComfyUI runs the [ComfyUI-Login](https://github.com/liusida/ComfyUI-Login)
+custom node (a password gate on every endpoint + the WebSocket), the app
+authenticates automatically — no manual entry needed for a local ComfyUI:
+
+- The API token is the bcrypt hash on **line 1 of
+  `<comfy_dir>/login/PASSWORD`** (the same value ComfyUI-Login itself accepts
+  as `Authorization: Bearer *** The app reads that file and sends the
+  header on every HTTP call and the `/ws` socket.
+- The token is resolved from config via `make_comfy()`: an explicit
+  `comfy_token` (Setup → *Login token*, optional) wins, otherwise it is
+  auto-derived from `comfy_dir`/`login/PASSWORD`. Leave the field empty for a
+  local ComfyUI; set it only if that ComfyUI runs on a different machine whose
+  password file you can't read.
+- **Test connection** now reports *why* a link fails: "requires login" (302) vs
+  "rejected the token" (401/403) vs "not reachable".
+
 ### Running as a service (recommended)
 
 The app is meant to be **always on**. On this box it runs as a **systemd user

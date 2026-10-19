@@ -22,7 +22,7 @@ from typing import Optional
 
 from config import (BENCHES_PATH, OUTPUTS_PATH, config,
                     atomic_write_json, read_json)
-from comfy import ComfyUI
+from comfy import ComfyUI, make_comfy
 from workflows import apply_overrides, apply_lora_overrides, model_name_for
 
 
@@ -496,7 +496,7 @@ class BenchRunner:
         self.seed = seed
         self.prompt_text = prompt_text
         self.prompt_node_id = prompt_node_id
-        self.comfy = ComfyUI(config.get("comfy_base") or "http://127.0.0.1:8188")
+        self.comfy = make_comfy(config)
         self._stop = threading.Event()
         self._stopped = False
         self._bench_since: Optional[float] = None
@@ -778,7 +778,7 @@ class LoraBenchRunner(BenchRunner):
         self.prompt_text = prompt_text
         self.prompt_node_id = prompt_node_id
         self.strength_clip = strength_clip
-        self.comfy = ComfyUI(config.get("comfy_base") or "http://127.0.0.1:8188")
+        self.comfy = make_comfy(config)
         self._stop = threading.Event()
         self._stopped = False
         self._bench_since: Optional[float] = None

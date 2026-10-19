@@ -30,6 +30,10 @@ LORAS_PATH = os.path.join(STATE_DIR, "loras.json")
 DEFAULTS = {
     "comfy_base": "http://127.0.0.1:8188",
     "comfy_dir": os.path.expanduser("~/ComfyUI2"),
+    # ComfyUI-Login API token. Empty (default) = auto-derive from
+    # <comfy_dir>/login/PASSWORD line 1. Set only to override (e.g. a remote
+    # ComfyUI whose password file we can't read).
+    "comfy_token": "",
     "model_roots": [
         os.path.expanduser("~/ComfyUI2/models/checkpoints"),
         os.path.expanduser("~/ComfyUI2/models/diffusion_models"),

@@ -2657,6 +2657,9 @@ async function renderSetup() {
         <h3>ComfyUI connection</h3>
         <label class="field"><span class="lab">Base URL</span>
           <input id="s-comfy" value="${esc(c.comfy_base||"")}"></label>
+        <label class="field"><span class="lab">Login token <span class="faint">(optional override)</span></span>
+          <input id="s-comfy-token" value="${esc(c.comfy_token||"")}" placeholder="auto from ${esc((c.comfy_dir||"ComfyUI2") + "/login/PASSWORD")}"></label>
+        <div class="faint small">Leave empty to auto-use the ComfyUI-Login token from your ComfyUI install. Set it only if that ComfyUI runs elsewhere.</div>
         <label class="field"><span class="lab">Output root</span>
           <input id="s-out" value="${esc(c.output_root||"")}"></label>
         <button class="btn" id="s-test">Test connection</button>
@@ -2773,9 +2776,11 @@ async function renderSetup() {
     try {
       const r = await API.post("/config/test-connection");
       if (r.ok) {
-        const dev = (r.device||[])[0];
-        out.innerHTML = `<span class="badge ok">connected</span> ${dev?`<span class="pill">${esc(dev.name||"GPU")}</span>`:""}`;
-      } else out.innerHTML = `<span class="badge err">not reachable</span>`;
+      const dev = (r.device||[])[0];
+      out.innerHTML = `<span class="badge ok">connected</span> ${dev?`<span class="pill">${esc(dev.name||"GPU")}</span>`:""}`;
+      } else {
+      out.innerHTML = `<span class="badge err">not reachable</span>` + (r.reason?`<div class="small mt">${esc(r.reason)}</div>`:"");
+      }
     } catch (e) { out.innerHTML = `<span class="badge err">error: ${esc(e.message)}</span>`; }
   };
   document.getElementById("s-save").onclick = async () => {
@@ -2789,6 +2794,7 @@ async function getToken() {
 async function saveSetup() {
   const body = {
     comfy_base: document.getElementById("s-comfy").value.trim(),
+    comfy_token: document.getElementById("s-comfy-token").value.trim(),
     output_root: document.getElementById("s-out").value.trim(),
     model_roots: document.getElementById("s-roots").value.split("\n").map(s=>s.trim()).filter(Boolean),
     lora_roots: document.getElementById("s-lora-roots").value.split("\n").map(s=>s.trim()).filter(Boolean),
